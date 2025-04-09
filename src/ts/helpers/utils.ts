@@ -70,7 +70,7 @@ export async function getCurrentMessageContent(): Promise<string> {
     let fullPlain = null
 
     // Case: Email viewing -->
-    if(messageDisplayed) {
+    if (messageDisplayed) {
         // Starting from Thunderbird 128, it is possible to use the function:
         // await messenger.messages.listInlineTextParts(messageDisplayed.id)
         // see https://webextension-api.thunderbird.net/en/128-esr-mv2/messages.html#listinlinetextparts-messageid
@@ -83,10 +83,10 @@ export async function getCurrentMessageContent(): Promise<string> {
             const currentPart = stack.pop()
 
             if (currentPart.body) {
-                if(currentPart.contentType?.toLowerCase() == 'text/html') {
+                if (currentPart.contentType?.toLowerCase() == 'text/html') {
                     fullHtml = currentPart.body
                 }
-                else if(currentPart.contentType?.toLowerCase() == 'text/plain') {
+                else if (currentPart.contentType?.toLowerCase() == 'text/plain') {
                     fullPlain = currentPart.body
                 }
             }
@@ -98,21 +98,22 @@ export async function getCurrentMessageContent(): Promise<string> {
     }
     // <-- case: Email viewing
     // Case: Email creation or edit -->
-    else if(composeDetails) {
+    else if (composeDetails) {
         fullHtml = composeDetails.body
         fullPlain = composeDetails.plainTextBody
     }
     // <-- case: Email creation or edit
 
-    if(fullPlain == null && fullHtml) {
+    if (fullPlain == null && fullHtml) {
         fullPlain = sanitizeHtml(fullHtml, {
             allowedTags: [],
-            allowedAttributes: {}})
+            allowedAttributes: {}
+        })
     }
 
     // Remove link (https and https), newlines and extra spaces before returning
     // the plain text
-    if(fullPlain) {
+    if (fullPlain) {
         fullPlain = fullPlain.replace(/https?:\/\/[^\s]+/g, '')
         fullPlain = fullPlain.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim()
     }
@@ -188,8 +189,10 @@ export async function logMessage(message: string, method: string = 'log'): Promi
  *
  * @returns A Promise that resolves when the message has been sent successfully
  */
-export async function sendMessageToActiveTab(message: {type: string,
-        content: Blob | string | { [key: string]: number } }): Promise<void> {
-    const tabs = await browser.tabs.query({active: true, currentWindow: true})
+export async function sendMessageToActiveTab(message: {
+    type: string,
+    content: Blob | string | { [key: string]: number }
+}): Promise<void> {
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true })
     await browser.tabs.sendMessage(tabs[0].id, message)
 }
