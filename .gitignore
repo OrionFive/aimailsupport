@@ -11,3 +11,7 @@ Thumbs.db
 
 # Environment variabile file for Jest
 .env
+aimailsupport.code-workspace
+ai-mail-support/options
+ai-mail-support/*.html
+ai-mail-support/*.js
