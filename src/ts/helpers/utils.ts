@@ -1,5 +1,20 @@
 import { ConfigType } from './configType'
-import sanitizeHtml from 'sanitize-html'
+
+/**
+ * Simple function to remove HTML tags from text
+ * @param html HTML string to sanitize
+ * @returns Plain text with HTML tags removed
+ */
+function simpleSanitizeHtml(html: string): string {
+    return html
+        .replace(/<[^>]*>/g, '') // Remove HTML tags
+        .replace(/&nbsp;/g, ' ')  // Replace non-breaking spaces
+        .replace(/&lt;/g, '<')    // Replace HTML entities
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+}
 
 /**
  * Retrieve data from browser storage for a specific key.
@@ -105,10 +120,7 @@ export async function getCurrentMessageContent(): Promise<string> {
     // <-- case: Email creation or edit
 
     if (fullPlain == null && fullHtml) {
-        fullPlain = sanitizeHtml(fullHtml, {
-            allowedTags: [],
-            allowedAttributes: {}
-        })
+        fullPlain = simpleSanitizeHtml(fullHtml);
     }
 
     // Remove link (https and https), newlines and extra spaces before returning
