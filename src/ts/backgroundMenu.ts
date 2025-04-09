@@ -402,30 +402,171 @@ async function handleRephrase(info: browser.menus.OnClickData, llmProvider: any)
 }
 
 /**
+ * Inserts text into the compose window before the quoted email.
+ * 
+ * @param tabId The ID of the tab containing the compose window
+ * @param replyText The text to insert as a reply
+ * @returns A promise that resolves when the operation is complete
+ */
+async function insertReplyIntoComposeWindow(tabId: number, replyText: string): Promise<void> {
+    try {
+        logMessage('Inserting reply into compose window', 'log');
+
+        // Get the compose details
+        const details = await browser.compose.getComposeDetails(tabId);
+        logMessage(`Got compose details: isPlainText=${details.isPlainText}`, 'log');
+
+        // Handle content based on compose mode
+        let content = details.isPlainText ? details.plainTextBody : details.body;
+        if (!content) {
+            logMessage('No content found in compose window', 'log');
+            return;
+        }
+
+        // Format the reply appropriately based on content type
+        let formattedReply;
+        if (details.isPlainText) {
+            formattedReply = replyText;
+        } else {
+            formattedReply = replyText.startsWith('<') ?
+                replyText :
+                '<p>' + replyText.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>') + '</p>';
+        }
+
+        if (details.isPlainText) {
+            // For plain text, find the original email header - match only at the beginning of a line
+            // The word boundary \b ensures we don't match 'on' within other words
+            const emailHeaderRegex = /\n\s*(\bOn\b .+wrote:)/;
+            const match = emailHeaderRegex.exec(content);
+
+            if (match && match.index) {
+                // Found the email header - replace everything before it
+                logMessage(`Found email header at position ${match.index}, match: "${match[1]}"`, 'log');
+                const newContent = formattedReply + '\n\n' + content.substring(match.index);
+                await browser.compose.setComposeDetails(tabId, { plainTextBody: newContent });
+            } else {
+                // Try a more specific regex for various date formats in email headers
+                const dateHeaderRegex = /\n\s*(\bOn\b .+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/;
+                const dateMatch = dateHeaderRegex.exec(content);
+
+                if (dateMatch && dateMatch.index) {
+                    logMessage(`Found date header at position ${dateMatch.index}, match: "${dateMatch[1]}"`, 'log');
+                    const newContent = formattedReply + '\n\n' + content.substring(dateMatch.index);
+                    await browser.compose.setComposeDetails(tabId, { plainTextBody: newContent });
+                    return;
+                }
+
+                // Look for multi-line quote patterns as fallback
+                const quoteMatch = content.match(/\n\s*(>[^\n]+\n\s*>[^\n]+)/);
+
+                if (quoteMatch && quoteMatch.index) {
+                    // Found multi-line quote - replace everything before it
+                    logMessage(`Found multi-line quote at position ${quoteMatch.index}`, 'log');
+                    const newContent = formattedReply + '\n\n' + content.substring(quoteMatch.index);
+                    await browser.compose.setComposeDetails(tabId, { plainTextBody: newContent });
+                } else {
+                    // No quotes found - just use our reply
+                    logMessage('No quote indicators found, using just our reply', 'log');
+                    await browser.compose.setComposeDetails(tabId, { plainTextBody: formattedReply });
+                }
+            }
+        } else {
+            // HTML handling
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(content, 'text/html');
+            const bodyElement = doc.body;
+
+            if (!bodyElement) {
+                // No body found - just use our reply
+                await browser.compose.setComposeDetails(tabId, { body: formattedReply });
+                return;
+            }
+
+            // Get the body HTML
+            const bodyHTML = bodyElement.innerHTML;
+
+            // Find the real email header (using word boundary \b to match whole "On" word)
+            const emailHeaderRegex = /(\b(?:On|From|Date).+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/i;
+            const match = emailHeaderRegex.exec(bodyHTML);
+
+            if (match && match.index) {
+                // Found email header - replace everything before it
+                logMessage(`Found email header in HTML at position ${match.index}, match: "${match[1]}"`, 'log');
+                const newBodyHTML = formattedReply + '<br>' + bodyHTML.substring(match.index);
+                bodyElement.innerHTML = newBodyHTML;
+            } else {
+                // Try to find a blockquote which typically contains the quoted email
+                const blockquoteIndex = bodyHTML.indexOf('<blockquote');
+
+                if (blockquoteIndex !== -1) {
+                    // Found a blockquote - replace everything before it
+                    logMessage(`Found blockquote at position ${blockquoteIndex}`, 'log');
+                    const newBodyHTML = formattedReply + '<br>' + bodyHTML.substring(blockquoteIndex);
+                    bodyElement.innerHTML = newBodyHTML;
+                } else {
+                    // Try to find a sequence of quoted lines (>)
+                    const quoteIndex = bodyHTML.indexOf('&gt;');
+
+                    if (quoteIndex !== -1) {
+                        logMessage(`Found quote marker at position ${quoteIndex}`, 'log');
+                        const newBodyHTML = formattedReply + '<br>' + bodyHTML.substring(quoteIndex);
+                        bodyElement.innerHTML = newBodyHTML;
+                    } else {
+                        // No email quote found - just use our reply
+                        logMessage('No quote indicators found in HTML', 'log');
+                        bodyElement.innerHTML = formattedReply;
+                    }
+                }
+            }
+
+            // Serialize the document back to HTML
+            const newContent = doc.documentElement.outerHTML;
+            await browser.compose.setComposeDetails(tabId, { body: newContent });
+        }
+
+        logMessage('Successfully updated compose window content', 'log');
+    } catch (error) {
+        logMessage(`Error inserting reply into compose window: ${error}`, 'error');
+        throw error; // Re-throw to allow caller to handle it
+    }
+}
+
+/**
  * Handle suggesting a reply for selected or current message text
  */
 async function handleSuggestReply(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
-    sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
+    sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') });
+    logMessage(`handling suggest reply`, 'log');
 
-    const textForSuggestion = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
+    try {
+        const textForSuggestion = (info.selectionText) ? info.selectionText : await getCurrentMessageContent();
 
-    if (textForSuggestion == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        // Extracts the tone of voice from the menuItemId by taking a substring
-        // starting from the 14th character.
-        // The value 14 corresponds to the length of the string 'aiSuggestReply',
-        // allowing the code to retrieve the portion of the menuItemId that
-        // follows 'aiRephrase'.
-        const toneOfVoice = (info.menuItemId as string).substring(14).toLowerCase()
+        if (textForSuggestion == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') });
+            return;
+        }
 
-        llmProvider.suggestReplyFromText(textForSuggestion, toneOfVoice).then(textSuggested => {
-            sendMessageToActiveTab({ type: 'addText', content: textSuggested })
-        }).catch(error => {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during reply generation: ${error.message}`, 'error')
-        })
+        // Extract tone of voice from the menu item ID
+        const toneOfVoice = (info.menuItemId as string).substring(14).toLowerCase();
+
+        // Generate the suggested reply
+        const textSuggested = await llmProvider.suggestReplyFromText(textForSuggestion, toneOfVoice);
+
+        // Show the reply in the panel so it's visible to the user
+        sendMessageToActiveTab({ type: 'addText', content: textSuggested });
+
+        // Try to insert the reply into the compose window
+        try {
+            const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+            await insertReplyIntoComposeWindow(tabs[0].id, textSuggested);
+        } catch (error) {
+            // If insertion fails, the reply is already visible in the panel
+            // so the user can still copy it manually
+            logMessage(`Failed to insert reply: ${error}`, 'error');
+        }
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error.message });
+        logMessage(`Error during reply generation: ${error.message}`, 'error');
     }
 }
 

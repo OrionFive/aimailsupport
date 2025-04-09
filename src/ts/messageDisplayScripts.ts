@@ -88,7 +88,7 @@ function thinking(thinkingText: string) {
 function createContainer(): void {
 
     // Avoid creating the element if it already exists
-    if(document.querySelector('#amsOuterResponse')) {
+    if (document.querySelector('#amsOuterResponse')) {
         return
     }
 
@@ -139,13 +139,13 @@ function createContainer(): void {
  *        The default value is false.
  */
 function clearContainer(destroy: boolean = false): void {
-    if(destroy) {
+    if (destroy) {
         document.querySelector('#amsOuterResponse').remove()
         return
     }
 
     // Ensure the component is visible
-    if(!document.querySelector('#amsOuterResponse').classList.contains('show')) {
+    if (!document.querySelector('#amsOuterResponse').classList.contains('show')) {
         document.querySelector('#amsOuterResponse').classList.add('show')
     }
 
