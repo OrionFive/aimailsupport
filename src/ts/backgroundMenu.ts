@@ -2,8 +2,8 @@ import { ProviderFactory } from './llmProviders/providerFactory'
 import { getConfigs, getCurrentMessageContent, logMessage, sendMessageToActiveTab } from './helpers/utils'
 
 // --- Global state for tracking open dialogs ---
-// Map<windowId, { promptId: string; context: string | null; tabId: number | undefined; }>
-const pendingDialogs = new Map<number, { promptId: string; context: string | null; tabId: number | undefined; }>();
+// Map<windowId, { promptId: string; context: string | null; tabId: number | undefined; replyType: string; }>
+const pendingDialogs = new Map<number, { promptId: string; context: string | null; tabId: number | undefined; replyType: string; }>();
 
 // Create the menu entries -->
 const menuIdSummarize = messenger.menus.create({
@@ -197,24 +197,6 @@ const menuIdSuggestReplyPolite = messenger.menus.create({
     ]
 })
 
-// --- Separator before Custom ---
-messenger.menus.create({
-    id: 'aiSuggestReplySeparator',
-    type: 'separator',
-    parentId: subMenuIdSuggestReply,
-    contexts: [
-        'compose_action_menu'
-    ]
-})
-
-const menuIdSuggestReplyCustom = messenger.menus.create({
-    id: 'aiSuggestReplyCustom',
-    title: browser.i18n.getMessage('mailSuggestReply.custom'),
-    parentId: subMenuIdSuggestReply,
-    contexts: [
-        'compose_action_menu'
-    ]
-})
 // <-- suggest reply submenu
 
 // Summarize submenu -->
@@ -345,10 +327,7 @@ messenger.menus.onClicked.addListener(async (info: browser.menus.OnClickData) =>
     else if ([menuIdSuggestReplyStandard, menuIdSuggestReplyFluid, menuIdSuggestReplyCreative, menuIdSuggestReplySimple,
         menuIdSuggestReplyFormal, menuIdSuggestReplyAcademic, menuIdSuggestReplyExpanded, menuIdSuggestReplyShortened,
         menuIdSuggestReplyPolite].includes(info.menuItemId)) {
-        handleSuggestReply(info, llmProvider)
-    }
-    else if (info.menuItemId === menuIdSuggestReplyCustom) {
-        handleSuggestCustomReply(info, llmProvider)
+        promptForSuggestReply(info, llmProvider)
     }
     else if (info.menuItemId == menuIdSummarizeAndText2Speech) {
         handleSummarizeAndText2Speech(info, llmProvider)
@@ -460,92 +439,92 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
         }
 
         if (details.isPlainText) {
-            // For plain text, find the original email header - match only at the beginning of a line
-            // The word boundary \b ensures we don't match 'on' within other words
-            const emailHeaderRegex = /\n\s*(\bOn\b .+wrote:)/;
-            const match = emailHeaderRegex.exec(content);
-
-            if (match && match.index) {
-                // Found the email header - replace everything before it
-                logMessage(`Found email header at position ${match.index}, match: "${match[1]}"`, 'log');
-                const newContent = formattedReply + '\n\n' + content.substring(match.index);
-                await browser.compose.setComposeDetails(tabId, { plainTextBody: newContent });
+            // For plain text, find the start of the quote
+            let quoteStartIndex = -1;
+            const headerRegex = /\n\s*(\bOn\b .+wrote:)/;
+            const headerMatch = headerRegex.exec(content);
+            if (headerMatch && headerMatch.index > -1) {
+                quoteStartIndex = headerMatch.index;
+                logMessage(`Found plain text header at index ${quoteStartIndex}`, 'log');
             } else {
-                // Try a more specific regex for various date formats in email headers
-                const dateHeaderRegex = /\n\s*(\bOn\b .+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/;
-                const dateMatch = dateHeaderRegex.exec(content);
-
-                if (dateMatch && dateMatch.index) {
-                    logMessage(`Found date header at position ${dateMatch.index}, match: "${dateMatch[1]}"`, 'log');
-                    const newContent = formattedReply + '\n\n' + content.substring(dateMatch.index);
-                    await browser.compose.setComposeDetails(tabId, { plainTextBody: newContent });
-                    return;
-                }
-
-                // Look for multi-line quote patterns as fallback
-                const quoteMatch = content.match(/\n\s*(>[^\n]+\n\s*>[^\n]+)/);
-
-                if (quoteMatch && quoteMatch.index) {
-                    // Found multi-line quote - replace everything before it
-                    logMessage(`Found multi-line quote at position ${quoteMatch.index}`, 'log');
-                    const newContent = formattedReply + '\n\n' + content.substring(quoteMatch.index);
-                    await browser.compose.setComposeDetails(tabId, { plainTextBody: newContent });
+                const dateRegex = /\n\s*(\bOn\b .+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/;
+                const dateMatch = dateRegex.exec(content);
+                if (dateMatch && dateMatch.index > -1) {
+                    quoteStartIndex = dateMatch.index;
+                    logMessage(`Found plain text date header at index ${quoteStartIndex}`, 'log');
                 } else {
-                    // No quotes found - just use our reply
-                    logMessage('No quote indicators found, using just our reply', 'log');
-                    await browser.compose.setComposeDetails(tabId, { plainTextBody: formattedReply });
+                    const quoteRegex = /\n\s*(>[^\n]+\n\s*>[^\n]+)/; // Match multi-line quote
+                    const quoteMatch = quoteRegex.exec(content);
+                    if (quoteMatch && quoteMatch.index > -1) {
+                        quoteStartIndex = quoteMatch.index;
+                        logMessage(`Found plain text quote marker at index ${quoteStartIndex}`, 'log');
+                    }
                 }
             }
-        } else {
-            // HTML handling
+
+            // Construct the new content
+            let newContent;
+            if (quoteStartIndex > -1) {
+                // Combine new reply with the identified quote onwards
+                const quotePart = content.substring(quoteStartIndex);
+                newContent = formattedReply + '\n\n' + quotePart;
+            } else {
+                // No quote found, just use the new reply
+                logMessage('No quote indicators found in plain text, using just our reply', 'log');
+                newContent = formattedReply;
+            }
+            await browser.compose.setComposeDetails(tabId, { plainTextBody: newContent });
+
+        } else { // HTML Handling
             const parser = new DOMParser();
             const doc = parser.parseFromString(content, 'text/html');
             const bodyElement = doc.body;
 
             if (!bodyElement) {
-                // No body found - just use our reply
+                logMessage('No body found in HTML, using just our reply', 'log');
                 await browser.compose.setComposeDetails(tabId, { body: formattedReply });
                 return;
             }
 
-            // Get the body HTML
             const bodyHTML = bodyElement.innerHTML;
+            let quoteStartIndex = -1;
 
-            // Find the real email header (using word boundary \b to match whole "On" word)
-            const emailHeaderRegex = /(\b(?:On|From|Date).+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/i;
-            const match = emailHeaderRegex.exec(bodyHTML);
-
-            if (match && match.index) {
-                // Found email header - replace everything before it
-                logMessage(`Found email header in HTML at position ${match.index}, match: "${match[1]}"`, 'log');
-                const newBodyHTML = formattedReply + '<br>' + bodyHTML.substring(match.index);
-                bodyElement.innerHTML = newBodyHTML;
+            // Find the start of the quote in HTML
+            const headerRegex = /(\b(?:On|From|Date).+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/i;
+            const headerMatch = headerRegex.exec(bodyHTML);
+            if (headerMatch && headerMatch.index > -1) {
+                quoteStartIndex = headerMatch.index;
+                logMessage(`Found HTML header at index ${quoteStartIndex}`, 'log');
             } else {
-                // Try to find a blockquote which typically contains the quoted email
                 const blockquoteIndex = bodyHTML.indexOf('<blockquote');
-
                 if (blockquoteIndex !== -1) {
-                    // Found a blockquote - replace everything before it
-                    logMessage(`Found blockquote at position ${blockquoteIndex}`, 'log');
-                    const newBodyHTML = formattedReply + '<br>' + bodyHTML.substring(blockquoteIndex);
-                    bodyElement.innerHTML = newBodyHTML;
+                    quoteStartIndex = blockquoteIndex;
+                    logMessage(`Found blockquote at index ${quoteStartIndex}`, 'log');
                 } else {
-                    // Try to find a sequence of quoted lines (>)
                     const quoteIndex = bodyHTML.indexOf('&gt;');
-
                     if (quoteIndex !== -1) {
-                        logMessage(`Found quote marker at position ${quoteIndex}`, 'log');
-                        const newBodyHTML = formattedReply + '<br>' + bodyHTML.substring(quoteIndex);
-                        bodyElement.innerHTML = newBodyHTML;
-                    } else {
-                        // No email quote found - just use our reply
-                        logMessage('No quote indicators found in HTML', 'log');
-                        bodyElement.innerHTML = formattedReply;
+                        // Try to find the start of the line containing &gt;
+                        const lineStartIndex = bodyHTML.lastIndexOf('<br', quoteIndex);
+                        quoteStartIndex = (lineStartIndex > -1) ? lineStartIndex : quoteIndex; // Prefer start of line
+                        logMessage(`Found HTML quote marker (&gt;) at index ${quoteIndex}, using index ${quoteStartIndex}`, 'log');
                     }
                 }
             }
 
-            // Serialize the document back to HTML
+            // Construct the new HTML content
+            let newBodyHTML;
+            if (quoteStartIndex > -1) {
+                // Combine new reply with the identified quote onwards
+                const quotePart = bodyHTML.substring(quoteStartIndex);
+                newBodyHTML = formattedReply + '<br>' + quotePart; // Add break before quote
+            } else {
+                // No quote found, just use the new reply
+                logMessage('No quote indicators found in HTML, using just our reply', 'log');
+                newBodyHTML = formattedReply;
+            }
+
+            // Update the body and set the details
+            bodyElement.innerHTML = newBodyHTML;
             const newContent = doc.documentElement.outerHTML;
             await browser.compose.setComposeDetails(tabId, { body: newContent });
         }
@@ -558,11 +537,14 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
 }
 
 /**
- * Opens a popup window to get custom reply instructions from the user.
+ * Opens a popup window to get custom reply instructions based on the selected reply type.
  */
-async function handleSuggestCustomReply(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
-    logMessage('Opening custom reply dialog', 'log');
-    const promptId = 'customReplySuggest';
+async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+    const menuItemId = info.menuItemId as string;
+    const replyType = menuItemId.substring(14).toLowerCase(); // e.g., "standard", "polite"
+    const promptId = `suggestReply-${replyType}-${Date.now()}`; // Unique prompt ID
+
+    logMessage(`Opening suggest reply dialog for type: ${replyType}`, 'log');
 
     // --- Get context BEFORE opening dialog --- 
     let initialContext: string | null = null;
@@ -573,10 +555,10 @@ async function handleSuggestCustomReply(info: browser.menus.OnClickData, llmProv
         if (!initialTabId) {
             throw new Error("Could not get active tab ID for context.");
         }
-        // Assuming getCurrentMessageContent works for compose context initially
-        initialContext = await getCurrentMessageContent();
+        initialContext = await getCurrentMessageContent(); // Use current message as context
         if (initialContext === null) {
-            throw new Error("Could not get initial message context.");
+            // Don't throw error, proceed without context if necessary, but log it
+            logMessage("Could not get initial message context.", 'warn');
         }
         logMessage(`Got initial context for tab ${initialTabId}`, 'log');
     } catch (error) {
@@ -587,98 +569,51 @@ async function handleSuggestCustomReply(info: browser.menus.OnClickData, llmProv
     // --- End context fetching ---
 
     try {
+        // Get the title of the clicked menu item to use as the dialog label
+        // Reconstruct the i18n key and fetch the localized title
+        // TODO: Remove all fallbacks for localization - if it's not found, the code is wrong!
+        const i18nKey = `mailSuggestReply.${replyType}`;
+        let dialogLabel = browser.i18n.getMessage(i18nKey);
+        // Fallback if i18n lookup fails (e.g., key missing)
+        if (!dialogLabel || dialogLabel === i18nKey) {
+            dialogLabel = `Instructions for ${replyType} reply:`;
+            logMessage(`Could not find i18n message for key: ${i18nKey}, using fallback.`, 'warn');
+        }
+
+        const dialogTitle = `Suggest ${replyType.charAt(0).toUpperCase() + replyType.slice(1)} Reply`;
+
         const params = new URLSearchParams({
             promptId: promptId,
-            title: 'Custom Reply Instructions',
-            label: 'Enter reply instructions:',
+            title: dialogTitle,
+            label: dialogLabel,
             buttonText: 'Suggest Reply',
-            defaultValue: ''
+            defaultValue: '' // Start with empty input
         });
         const dialogUrl = `dialogs/customReplyDialog.html?${params.toString()}`;
 
         const newWindow = await browser.windows.create({
             url: dialogUrl,
             type: 'popup',
-            width: 400,
-            height: 250
+            width: 450, // Slightly wider default
+            height: 300
         });
 
-        // Track the opened dialog window with context
+        // Track the opened dialog window with context and reply type
         if (newWindow.id) {
-            pendingDialogs.set(newWindow.id, { promptId, context: initialContext, tabId: initialTabId }); // Store context & tabId
-            logMessage(`Tracking dialog window ${newWindow.id} for prompt ${promptId}`, 'log');
+            pendingDialogs.set(newWindow.id, {
+                promptId,
+                context: initialContext,
+                tabId: initialTabId,
+                replyType // Store the reply type
+            });
+            logMessage(`Tracking dialog window ${newWindow.id} for prompt ${promptId} (type: ${replyType})`, 'log');
         } else {
             logMessage('Could not get window ID for created dialog', 'warn');
         }
 
     } catch (error) {
-        logMessage(`Error opening custom reply dialog: ${error}`, 'error');
+        logMessage(`Error opening suggest reply dialog: ${error}`, 'error');
         sendMessageToActiveTab({ type: 'showError', content: `Error opening dialog: ${error.message}` });
-    }
-}
-
-/**
- * Handle suggesting a reply for selected or current message text
- * Now accepts optional custom instructions and an optional targetTabId.
- */
-async function handleSuggestReply(
-    info: browser.menus.OnClickData,
-    llmProvider: any,
-    customInstructions: string | null = null,
-    targetTabId?: number // Added optional tabId
-): Promise<void> {
-    // Use targetTabId if provided, otherwise try to find active tab (for non-dialog flows)
-    let effectiveTabId = targetTabId;
-    if (!effectiveTabId) {
-        try {
-            const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-            effectiveTabId = tabs[0]?.id;
-        } catch (e) { /* Ignore error, proceed without tab ID if necessary */ }
-    }
-
-    // Send thinking message TO THE SPECIFIC TAB if ID is known
-    sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') }, effectiveTabId);
-    logMessage(`handling suggest reply (custom: ${!!customInstructions}, tab: ${effectiveTabId})`, 'log');
-
-    try {
-        // Use context from info.selectionText if customInstructions are provided (it was pre-filled)
-        // Otherwise, use selection or fetch current content.
-        const textForContext = customInstructions ? info.selectionText : (info.selectionText ? info.selectionText : await getCurrentMessageContent());
-
-        if (textForContext == null) { // Simplified check
-            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') }, effectiveTabId);
-            return;
-        }
-
-        let textSuggested: string;
-
-        if (customInstructions) {
-            // Pass the pre-filled context and custom instructions
-            textSuggested = await llmProvider.suggestReplyFromText(textForContext, null, customInstructions);
-        } else {
-            // Original logic for predefined tones, using fetched/selected context
-            const toneOfVoice = (info.menuItemId as string).substring(14).toLowerCase();
-            textSuggested = await llmProvider.suggestReplyFromText(textForContext, toneOfVoice);
-        }
-
-        // Show the reply in the panel of THE SPECIFIC TAB
-        sendMessageToActiveTab({ type: 'addText', content: textSuggested }, effectiveTabId);
-
-        // Try to insert the reply into the compose window OF THE SPECIFIC TAB
-        if (effectiveTabId) {
-            try {
-                await insertReplyIntoComposeWindow(effectiveTabId, textSuggested);
-            } catch (error) {
-                logMessage(`Failed to insert reply automatically into tab ${effectiveTabId}: ${error}`, 'error');
-                sendMessageToActiveTab({ type: 'showError', content: `${messenger.i18n.getMessage('errorSuggestReplyInsertFailed')}: ${error.message}` }, effectiveTabId);
-            }
-        } else {
-            logMessage('Could not determine target tab ID to insert reply.', 'warn');
-            // Cannot insert without tab ID, but message was shown in panel if active tab was found earlier
-        }
-    } catch (error) {
-        sendMessageToActiveTab({ type: 'showError', content: error.message }, effectiveTabId);
-        logMessage(`Error during reply generation: ${error.message}`, 'error');
     }
 }
 
@@ -882,41 +817,68 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
         // Retrieve stored data and remove from tracking
         const dialogData = pendingDialogs.get(senderWindowId);
         pendingDialogs.delete(senderWindowId);
-        logMessage(`Retrieved and removed dialog data for window ${senderWindowId}`, 'log');
+        logMessage(`Retrieved and removed dialog data for window ${senderWindowId}: ${JSON.stringify(dialogData)}`, 'log');
 
-        // Route based on promptId
-        if (dialogData.promptId === 'customReplySuggest') {
+        if (!dialogData) { // Should not happen if .has check passes, but good practice
+            logMessage(`Error: No dialog data found for window ID ${senderWindowId}`, 'error');
+            return;
+        }
+
+        // --- Route based on promptId prefix ---
+        if (dialogData.promptId.startsWith('suggestReply-')) {
             if (message.status === 'submitted' && message.value) {
+                logMessage(`Processing submitted suggest reply: type=${dialogData.replyType}, tabId=${dialogData.tabId}`, 'log');
 
-                // --- Use stored context and call handleSuggestReply ---
-                if (dialogData.context === null || dialogData.tabId === undefined) {
-                    logMessage(`Error: Stored context or tabId is invalid for prompt ${dialogData.promptId}`, 'error');
-                    sendMessageToActiveTab({ type: 'showError', content: 'Internal error: Could not retrieve original context.' });
+                // Ensure we have necessary data
+                if (dialogData.tabId === undefined) {
+                    logMessage(`Error: Stored tabId is invalid for prompt ${dialogData.promptId}`, 'error');
+                    // Attempt to send error to active tab if possible
+                    sendMessageToActiveTab({ type: 'showError', content: 'Internal error: Could not determine original tab.' });
                     return;
                 }
-
-                const configs = await getConfigs();
-                const llmProvider = ProviderFactory.getInstance(configs);
-                try {
-                    // Create dummy info object with STORED context
-                    const dummyInfo: Partial<browser.menus.OnClickData> = {
-                        menuItemId: menuIdSuggestReplyCustom,
-                        selectionText: dialogData.context // Use stored context
-                    };
-                    // Call handleSuggestReply, passing the submitted value, stored context (via dummyInfo),
-                    // AND the stored tabId for targeting the reply insertion.
-                    await handleSuggestReply(dummyInfo as browser.menus.OnClickData, llmProvider, message.value, dialogData.tabId);
-                } catch (error) {
-                    logMessage(`Error handling custom reply submission: ${error}`, 'error');
-                    sendMessageToActiveTab({ type: 'showError', content: `Error processing custom reply: ${error.message}` });
+                // Context can be null, handle appropriately
+                if (dialogData.context === null) {
+                    logMessage(`Warning: Stored context is null for prompt ${dialogData.promptId}`, 'warn');
+                    // Consider if an error message is needed if context is mandatory for the LLM
                 }
-                // --- End custom reply handling ---
+
+                const effectiveTabId = dialogData.tabId;
+                const textForContext = dialogData.context; // Use stored context
+                const replyType = dialogData.replyType; // Use stored reply type
+                const customInstructions = message.value; // User input from dialog
+
+                // Send thinking message TO THE SPECIFIC TAB 
+                sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') }, effectiveTabId);
+
+                try {
+                    const configs = await getConfigs();
+                    const llmProvider = ProviderFactory.getInstance(configs);
+
+                    // Call LLM provider with context, type, and custom instructions
+                    logMessage(`Calling LLM provider with context: ${textForContext}, type: ${replyType}, customInstructions: ${customInstructions}`, 'log');
+                    const textSuggested = await llmProvider.suggestReplyFromText(textForContext, replyType/* TODO: , customInstructions */);
+
+                    // Show the reply in the panel of THE SPECIFIC TAB
+                    sendMessageToActiveTab({ type: 'addText', content: textSuggested }, effectiveTabId);
+
+                    // Try to insert the reply into the compose window OF THE SPECIFIC TAB
+                    try {
+                        await insertReplyIntoComposeWindow(effectiveTabId, textSuggested);
+                    } catch (insertError) {
+                        logMessage(`Failed to insert reply automatically into tab ${effectiveTabId}: ${insertError}`, 'error');
+                        sendMessageToActiveTab({ type: 'showError', content: `${messenger.i18n.getMessage('errorSuggestReplyInsertFailed')}: ${insertError.message}` }, effectiveTabId);
+                    }
+
+                } catch (error) {
+                    sendMessageToActiveTab({ type: 'showError', content: error.message }, effectiveTabId);
+                    logMessage(`Error during reply generation (type: ${replyType}): ${error.message}`, 'error');
+                }
             }
-            // No need to handle status === 'cancelled', onRemoved handles it
+            // If status is 'cancelled', it's handled by the onRemoved listener
         }
         // --- Add more else if blocks here for other promptIds in the future ---
         else {
-            logMessage(`Received dialog response with unknown promptId: ${dialogData.promptId}`, 'warn');
+            logMessage(`Received dialog response with unknown promptId prefix: ${dialogData.promptId}`, 'warn');
         }
     }
     // Handle other message types if any...
@@ -925,12 +887,17 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
 // --- Listener for window removal (handles cancellation) ---
 browser.windows.onRemoved.addListener((closedWindowId) => {
     if (pendingDialogs.has(closedWindowId)) {
-        const { promptId, context, tabId } = pendingDialogs.get(closedWindowId);
-        logMessage(`Dialog window ${closedWindowId} (prompt: ${promptId}) was closed without submitting. Treating as cancel.`, 'log');
+        const dialogData = pendingDialogs.get(closedWindowId);
+        // Use a guard clause for type safety
+        if (!dialogData) return;
+
+        const { promptId, context, tabId, replyType } = dialogData;
+        logMessage(`Dialog window ${closedWindowId} (prompt: ${promptId}, type: ${replyType}) was closed without submitting. Treating as cancel.`, 'log');
 
         // Trigger cancellation logic based on promptId if needed
-        if (promptId === 'customReplySuggest') {
-            // Optionally notify user or perform specific cleanup for this prompt
+        if (promptId.startsWith('suggestReply-')) {
+            // Optionally notify user or perform specific cleanup for this prompt type
+            // e.g., sendMessageToActiveTab({ type: 'showInfo', content: 'Suggest reply cancelled.' }, tabId);
         }
         // Add more else if blocks for other promptIds
 
@@ -1002,3 +969,4 @@ async function updateMenuVisibility(): Promise<void> {
     })
     // <-- canTranslateText
 }
+
