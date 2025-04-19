@@ -308,5 +308,11 @@
     },
     "options.xai.apiKey.description": {
         "message": "Vai sul sito <a href=\"https://console.x.ai\">xAI console</a> per recuperare o creare una chiave."
+    },
+    "customReplyDialogInstructionLabel": {
+        "message": "Istruzioni per la risposta:"
+    },
+    "customReplyDialogTitle": {
+        "message": "Istruzioni"
     }
 }

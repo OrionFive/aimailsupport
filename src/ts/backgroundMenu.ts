@@ -276,6 +276,7 @@ const menuIdModerate = messenger.menus.create({
     ]
 })
 
+/* Not very useful, maybe we can improve it in the future.
 const menuIdSuggestImprovements = messenger.menus.create({
     id: 'aiSuggestImprovements',
     title: browser.i18n.getMessage('mailSuggestImprovements'),
@@ -285,6 +286,7 @@ const menuIdSuggestImprovements = messenger.menus.create({
         'selection'
     ]
 })
+*/
 
 // Separator for the message display action menu
 browser.menus.create({
@@ -347,9 +349,11 @@ messenger.menus.onClicked.addListener(async (info: browser.menus.OnClickData) =>
     else if (info.menuItemId == menuIdModerate) {
         handleModerate(info, llmProvider)
     }
+    /* 
     else if (info.menuItemId == menuIdSuggestImprovements) {
         handleSuggestImprovements(info, llmProvider)
     }
+    */
     // Fallback message case, but only if the menu does not match any values to
     // ignore, e.g., options.
     else if (!['aiOptions'].includes(info.menuItemId as string)) {
@@ -571,16 +575,10 @@ async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvide
     try {
         // Get the title of the clicked menu item to use as the dialog label
         // Reconstruct the i18n key and fetch the localized title
-        // TODO: Remove all fallbacks for localization - if it's not found, the code is wrong!
-        const i18nKey = `mailSuggestReply.${replyType}`;
-        let dialogLabel = browser.i18n.getMessage(i18nKey);
-        // Fallback if i18n lookup fails (e.g., key missing)
-        if (!dialogLabel || dialogLabel === i18nKey) {
-            dialogLabel = `Instructions for ${replyType} reply:`;
-            logMessage(`Could not find i18n message for key: ${i18nKey}, using fallback.`, 'warn');
-        }
+        let dialogTitle = browser.i18n.getMessage('customReplyDialogTitle');
 
-        const dialogTitle = `Suggest ${replyType.charAt(0).toUpperCase() + replyType.slice(1)} Reply`;
+        // Use the new generic label key
+        let dialogLabel = browser.i18n.getMessage('customReplyDialogInstructionLabel');
 
         const params = new URLSearchParams({
             promptId: promptId,
@@ -938,9 +936,11 @@ async function updateMenuVisibility(): Promise<void> {
     // <-- canSpeechFromText
 
     // canSuggestImprovementsForText -->
+    /* Not very useful, maybe we can improve it in the future.
     messenger.menus.update(menuIdSuggestImprovements, {
         enabled: llmProvider.getCanSuggestImprovementsForText()
     })
+    */
     // <-- canSuggestImprovementsForText
 
     // canSuggestReply -->

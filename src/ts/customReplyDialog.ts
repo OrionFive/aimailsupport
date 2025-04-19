@@ -48,14 +48,9 @@ async function sendResponseAndClose(status: 'submitted' | 'cancelled', value?: s
 // --- Event Listeners ---
 
 submitButton.addEventListener('click', async () => {
-    const inputValue = dialogInput.value.trim();
-    if (inputValue) {
-        // Send response and close dialog
-        sendResponseAndClose('submitted', inputValue);
-    } else {
-        dialogInput.focus();
-        alert('Please enter some input.'); // Or customize this feedback
-    }
+    const inputValue = dialogInput.value; // No longer trimming or checking if empty
+    // Send response (even if empty) and close dialog
+    sendResponseAndClose('submitted', inputValue);
 });
 
 cancelButton.addEventListener('click', () => {

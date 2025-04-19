@@ -406,5 +406,11 @@
     "options.xai.apiKey.description": {
         "message": "Go to the <a href=\"https://console.x.ai\">xAI console</a> site to retrieve or create a key.",
         "description": "Description of the website where it is possible to generate an API access key."
+    },
+    "customReplyDialogInstructionLabel": {
+        "message": "Instructions for response:"
+    },
+    "customReplyDialogTitle": {
+        "message": "Instructions"
     }
 }
