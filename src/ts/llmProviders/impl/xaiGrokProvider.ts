@@ -30,10 +30,15 @@ export class XaiGrokProvider extends GenericProvider {
         return this.manageMessageContent(this.PROMPTS.SUGGEST_IMPROVEMENTS, input)
     }
 
-    public async suggestReplyFromText(input: string, toneOfVoice: string): Promise<string> {
-        logMessage(`Request to use the tone of voice "${toneOfVoice}" to suggest a reply to the text: ${input}`, 'debug')
+    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
+        logMessage(`Request to suggest a reply to the text: ${input}${customInstructions ? ' with custom instructions: ' + customInstructions : ''}`, 'debug')
 
-        return this.manageMessageContent(this.PROMPTS.SUGGEST_REPLY.replace('%s', toneOfVoice), input)
+        let prompt = this.PROMPTS.SUGGEST_REPLY;
+        if (customInstructions) {
+            prompt += `\n\nFollow these additional instructions/comments from the recipient: ${customInstructions}`;
+        }
+
+        return this.manageMessageContent(prompt, input)
     }
 
     public async summarizeText(input: string): Promise<string> {

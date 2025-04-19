@@ -9,9 +9,9 @@ export class GenericProvider {
     protected servicesTimeout: number
 
     protected readonly PROMPTS = {
-        REPHRASE: 'Take the following text and rephrase it according to the %s style using the same language as the text',
+        REPHRASE: 'Take the following text and rephrase it using a %s style and the same language as the text',
         SUGGEST_IMPROVEMENTS: 'Suggest improvements to the content of the following email, focusing only on the main message. Ignore any unusual characters, email formatting, signatures, or standard email headers',
-        SUGGEST_REPLY: 'Suggest a response to the email content in the same language as the email, focusing only on the main message. Ignore any unusual characters, email formatting, signatures, or standard email headers',
+        SUGGEST_REPLY: 'Suggest a response to the email content in the same language and tone, focusing only on the main message. Ignore any unusual characters, email formatting, signatures, or standard email headers',
         SUMMARIZE: 'Summarize the email content in the same language as the email, focusing only on the main message. Ignore any unusual characters, email formatting, signatures, or standard email headers',
         TRANSLATE: 'Translate the email content to %s, focusing only on the main message. Ignore any unusual characters, email formatting, signatures, or standard email headers'
     }
@@ -75,12 +75,11 @@ export class GenericProvider {
      * specified tone of voice.
      *
      * @param input - The input text for which a reply is suggested.
-     * @param toneOfVoice - The town on voice to be applied for rewriting
-     *        (e.g., "formal", "creative", "polite", ...).
+     * @param customInstructions - Optional custom instructions provided by the user.
      *
      * @returns A Promise resolving to the suggested reply.
      */
-    public async suggestReplyFromText(input: string, toneOfVoice: string): Promise<string> {
+    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
         throw new Error(browser.i18n.getMessage('errorInvalidAddonOptions'))
     }
 
@@ -163,8 +162,10 @@ export class GenericProvider {
      *
      * @returns An object containing the AbortSignal and a clear function.
      */
-    protected createAbortSignalWithTimeout(timeout: number): { signal: AbortSignal,
-            clearAbortSignalWithTimeout: () => void } {
+    protected createAbortSignalWithTimeout(timeout: number): {
+        signal: AbortSignal,
+        clearAbortSignalWithTimeout: () => void
+    } {
         const controller = new AbortController()
         const timeoutId = setTimeout(() => controller.abort(), timeout * 1000)
 

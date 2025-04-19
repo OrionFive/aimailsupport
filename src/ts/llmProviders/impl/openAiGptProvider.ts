@@ -107,10 +107,15 @@ export class OpenAiGptProvider extends GenericProvider {
         return this.manageMessageContent(this.PROMPTS.SUGGEST_IMPROVEMENTS, input)
     }
 
-    public async suggestReplyFromText(input: string, toneOfVoice: string): Promise<string> {
-        logMessage(`Request to use the tone of voice "${toneOfVoice}" to suggest a reply to the text: ${input}`, 'debug')
+    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
+        logMessage(`Request to suggest a reply to the text: ${input}${customInstructions ? ' with custom instructions: ' + customInstructions : ''}`, 'debug')
 
-        return this.manageMessageContent(this.PROMPTS.SUGGEST_REPLY.replace('%s', toneOfVoice), input)
+        let prompt = this.PROMPTS.SUGGEST_REPLY;
+        if (customInstructions) {
+            prompt += `\n\nFollow these additional instructions/comments from the recipient: ${customInstructions}`;
+        }
+
+        return this.manageMessageContent(prompt, input)
     }
 
     public async summarizeText(input: string): Promise<string> {
@@ -139,7 +144,7 @@ export class OpenAiGptProvider extends GenericProvider {
         headers.append('Authorization', `Bearer ${this.apiKey}`)
         headers.append('Content-Type', 'application/json')
 
-        if(this.organizationId) {
+        if (this.organizationId) {
             headers.append('OpenAI-Organization', this.organizationId)
         }
 
@@ -216,13 +221,13 @@ export class OpenAiGptProvider extends GenericProvider {
                 // category.
                 // Each moderation category (e.g., "hate/threatening") has an
                 // associated name that may contain the "/" character, but
-                // since localization keys cannot contain "/", it’s necessary 
+                // since localization keys cannot contain "/", it's necessary 
                 // to replace "/" with "_",
                 // The string 'mailModerate.openaiClassification.' is concatenated
                 // with the modified category (where "/" is replaced with "_") to
                 // form a localization key. This key is then used to retrieve the
                 // translated text associated with that specific moderation category
-                // in line with OpenAI’s moderation documentation available at: 
+                // in line with OpenAI's moderation documentation available at: 
                 // https://platform.openai.com/docs/guides/moderation/quickstart?moderation-quickstart-examples=text
                 const translatedCategory = browser.i18n.getMessage('mailModerate.openaiClassification.' + category.replace(/\//g, '_'))
 

@@ -2,8 +2,8 @@ import { ProviderFactory } from './llmProviders/providerFactory'
 import { getConfigs, getCurrentMessageContent, logMessage, sendMessageToActiveTab } from './helpers/utils'
 
 // --- Global state for tracking open dialogs ---
-// Map<windowId, { promptId: string; context: string | null; tabId: number | undefined; replyType: string; }>
-const pendingDialogs = new Map<number, { promptId: string; context: string | null; tabId: number | undefined; replyType: string; }>();
+// Map<windowId, { promptId: string; context: string | null; tabId: number | undefined; }>
+const pendingDialogs = new Map<number, { promptId: string; context: string | null; tabId: number | undefined; }>();
 
 // Create the menu entries -->
 const menuIdSummarize = messenger.menus.create({
@@ -108,6 +108,7 @@ const menuIdRephrasePolite = messenger.menus.create({
 // <-- rephrase submenu
 
 // Suggest reply submenu -->
+/* REMOVE SUBMENU
 const subMenuIdSuggestReply = messenger.menus.create({
     id: 'aiSubMenuSuggestReply',
     title: browser.i18n.getMessage('mailSuggestReply'),
@@ -198,6 +199,16 @@ const menuIdSuggestReplyPolite = messenger.menus.create({
 })
 
 // <-- suggest reply submenu
+*/
+
+// ADD SINGLE MENU ITEM
+const menuIdSuggestReply = messenger.menus.create({
+    id: 'aiSuggestReply', // Use a simple ID
+    title: browser.i18n.getMessage('mailSuggestReply'),
+    contexts: [
+        'compose_action_menu'
+    ]
+})
 
 // Summarize submenu -->
 const subMenuIdSummarize = messenger.menus.create({
@@ -326,9 +337,7 @@ messenger.menus.onClicked.addListener(async (info: browser.menus.OnClickData) =>
         menuIdRephrasePolite].includes(info.menuItemId)) {
         handleRephrase(info, llmProvider)
     }
-    else if ([menuIdSuggestReplyStandard, menuIdSuggestReplyFluid, menuIdSuggestReplyCreative, menuIdSuggestReplySimple,
-        menuIdSuggestReplyFormal, menuIdSuggestReplyAcademic, menuIdSuggestReplyExpanded, menuIdSuggestReplyShortened,
-        menuIdSuggestReplyPolite].includes(info.menuItemId)) {
+    else if (info.menuItemId === menuIdSuggestReply) {
         promptForSuggestReply(info, llmProvider)
     }
     else if (info.menuItemId == menuIdSummarizeAndText2Speech) {
@@ -627,11 +636,9 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
  * Opens a popup window to get custom reply instructions based on the selected reply type.
  */
 async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
-    const menuItemId = info.menuItemId as string;
-    const replyType = menuItemId.substring(14).toLowerCase(); // e.g., "standard", "polite"
-    const promptId = `suggestReply-${replyType}-${Date.now()}`; // Unique prompt ID
+    const promptId = `suggestReply-${Date.now()}`; // Simpler unique prompt ID
 
-    logMessage(`Opening suggest reply dialog for type: ${replyType}`, 'log');
+    logMessage(`Opening suggest reply dialog`, 'log');
 
     // --- Get context BEFORE opening dialog --- 
     let initialContext: string | null = null;
@@ -690,10 +697,9 @@ async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvide
             pendingDialogs.set(newWindow.id, {
                 promptId,
                 context: initialContext,
-                tabId: initialTabId,
-                replyType // Store the reply type
+                tabId: initialTabId
             });
-            logMessage(`Tracking dialog window ${newWindow.id} for prompt ${promptId} (type: ${replyType})`, 'log');
+            logMessage(`Tracking dialog window ${newWindow.id} for prompt ${promptId}`, 'log');
         } else {
             logMessage('Could not get window ID for created dialog', 'warn');
         }
@@ -907,7 +913,7 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
         logMessage(`Retrieved and removed dialog data for window ${senderWindowId}.`, 'log');
 
         if (!dialogData) { // Should not happen if .has check passes, but good practice
-            logMessage(`Error: No dialog data found for window ID ${senderWindowId}`, 'error');
+            logMessage(`Error: No stored dialog data found for window ID ${senderWindowId}`, 'error');
             return;
         }
 
@@ -915,7 +921,7 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
         if (dialogData.promptId.startsWith('suggestReply-')) {
             // Allow submission even if the value (custom instructions) is empty
             if (message.status === 'submitted') {
-                logMessage(`Processing submitted suggest reply: type=${dialogData.replyType}, tabId=${dialogData.tabId}`, 'log');
+                logMessage(`Processing submitted suggest reply for tabId=${dialogData.tabId}`, 'log');
 
                 // Ensure we have necessary data
                 if (dialogData.tabId === undefined) {
@@ -932,7 +938,6 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
 
                 const effectiveTabId = dialogData.tabId;
                 const textForContext = dialogData.context; // Use stored context
-                const replyType = dialogData.replyType; // Use stored reply type
                 const customInstructions = message.value; // User input from dialog
 
                 // === Pre-LLM Check ===
@@ -951,8 +956,8 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
                     const llmProvider = ProviderFactory.getInstance(configs);
 
                     // Call LLM provider with context, type, and custom instructions
-                    logMessage(`Calling LLM provider with context: ${textForContext}, type: ${replyType}, customInstructions: ${customInstructions}`, 'log');
-                    const textSuggested = await llmProvider.suggestReplyFromText(textForContext, replyType, customInstructions);
+                    logMessage(`Calling LLM provider with context: ${textForContext}, customInstructions: ${customInstructions}`, 'log');
+                    const textSuggested = await llmProvider.suggestReplyFromText(textForContext, customInstructions);
 
                     // Show the reply in the panel of THE SPECIFIC TAB
                     sendMessageToActiveTab({ type: 'addText', content: textSuggested }, effectiveTabId);
@@ -967,7 +972,7 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
 
                 } catch (error) {
                     sendMessageToActiveTab({ type: 'showError', content: error.message }, effectiveTabId);
-                    logMessage(`Error during reply generation (type: ${replyType}): ${error.message}`, 'error');
+                    logMessage(`Error during reply generation: ${error.message}`, 'error');
                 }
             }
             // If status is 'cancelled', it's handled by the onRemoved listener
@@ -987,8 +992,8 @@ browser.windows.onRemoved.addListener((closedWindowId) => {
         // Use a guard clause for type safety
         if (!dialogData) return;
 
-        const { promptId, context, tabId, replyType } = dialogData;
-        logMessage(`Dialog window ${closedWindowId} (prompt: ${promptId}, type: ${replyType}) was closed without submitting. Treating as cancel.`, 'log');
+        const { promptId, context, tabId } = dialogData;
+        logMessage(`Dialog window ${closedWindowId} (prompt: ${promptId}) was closed without submitting. Treating as cancel.`, 'log');
 
         // Trigger cancellation logic based on promptId if needed
         if (promptId.startsWith('suggestReply-')) {
@@ -1042,7 +1047,7 @@ async function updateMenuVisibility(): Promise<void> {
     // <-- canSuggestImprovementsForText
 
     // canSuggestReply -->
-    messenger.menus.update(subMenuIdSuggestReply, {
+    messenger.menus.update(menuIdSuggestReply, {
         enabled: llmProvider.getCanSuggestReply()
     })
     // <-- canSuggestReply
