@@ -14,8 +14,8 @@ function getUrlParameter(name: string): string | null {
     return results === null ? null : decodeURIComponent(results[1].replace(/\+/g, ' '));
 }
 
-// Function to send response back to background script
-async function sendResponse(status: 'submitted' | 'cancelled', value?: string) {
+// Function to send response back to background script and close
+async function sendResponseAndClose(status: 'submitted' | 'cancelled', value?: string) {
     if (!promptId) {
         console.error('Cannot send response, promptId is missing.');
         alert('Internal error: Missing prompt identifier.');
@@ -28,14 +28,18 @@ async function sendResponse(status: 'submitted' | 'cancelled', value?: string) {
     }
 
     try {
-        await browser.runtime.sendMessage({
+        // Fire and forget: Send message but don't wait for the listener to finish
+        browser.runtime.sendMessage({
             type: 'dialogResponse',
             status: status,
             promptId: promptId,
             value: value // Will be undefined for cancelled status
         });
+        // Close immediately after *initiating* the send
         window.close();
     } catch (error) {
+        // This catch might not reliably catch background listener errors now,
+        // but will catch immediate sendMessage errors (e.g., invalid args)
         console.error('Error sending dialog response message:', error);
         alert(`Error sending response: ${(error as Error).message}`);
     }
@@ -46,7 +50,8 @@ async function sendResponse(status: 'submitted' | 'cancelled', value?: string) {
 submitButton.addEventListener('click', async () => {
     const inputValue = dialogInput.value.trim();
     if (inputValue) {
-        sendResponse('submitted', inputValue);
+        // Send response and close dialog
+        sendResponseAndClose('submitted', inputValue);
     } else {
         dialogInput.focus();
         alert('Please enter some input.'); // Or customize this feedback
@@ -54,7 +59,7 @@ submitButton.addEventListener('click', async () => {
 });
 
 cancelButton.addEventListener('click', () => {
-    // Just close the window; background script handles cancellation via onRemoved
+    // Just close the window; background handles cancellation
     window.close();
 });
 

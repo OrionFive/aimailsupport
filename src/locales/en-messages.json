@@ -159,6 +159,10 @@
         "message": "Standard",
         "description": "This option suggests a reply to an email ensuring a standard tone of voice."
     },
+    "mailSuggestReply.custom": {
+        "message": "Custom...",
+        "description": "Menu item to suggest a reply based on custom user instructions"
+    },
     "mailSummarize": {
         "message": "Summarize",
         "description": "Menu option to summarize the content of an email or a portion of it."

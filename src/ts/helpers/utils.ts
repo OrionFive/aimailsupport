@@ -189,7 +189,7 @@ export async function logMessage(message: string, method: string = 'log'): Promi
 }
 
 /**
- * Sends a message to the currently active tab in the browser
+ * Sends a message to a specific tab or the currently active tab.
  *
  * @param message - An object containing the message to be sent, with
  *        properties 'type' and 'content'.
@@ -198,13 +198,39 @@ export async function logMessage(message: string, method: string = 'log'): Promi
  *        The index signature type is { [key: string]: number }, meaning an
  *        object whose keys are strings and values are numbers.
  *        This type is used to manage graphs.
- *
+  * @param targetTabId - (Optional) The ID of the tab to send the message to. 
+ *        If not provided, the message is sent to the currently active tab.
  * @returns A Promise that resolves when the message has been sent successfully
  */
 export async function sendMessageToActiveTab(message: {
     type: string,
     content: Blob | string | { [key: string]: number }
-}): Promise<void> {
-    const tabs = await browser.tabs.query({ active: true, currentWindow: true })
-    await browser.tabs.sendMessage(tabs[0].id, message)
+}, targetTabId?: number): Promise<void> {
+    let tabIdToSend: number | undefined = targetTabId; // Use provided ID if available
+
+    if (!tabIdToSend) {
+        // Fallback: Find the currently active tab if no specific ID was given
+        try {
+            const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+            if (tabs.length > 0 && tabs[0].id) {
+                tabIdToSend = tabs[0].id;
+            } else {
+                logMessage('Could not find active tab to send message to.', 'warn');
+                return; // Cannot send message
+            }
+        } catch (error) {
+            logMessage(`Error querying active tab: ${error}`, 'error');
+            return; // Cannot send message
+        }
+    }
+
+    // Send the message to the determined tab ID
+    try {
+        await browser.tabs.sendMessage(tabIdToSend, message);
+    } catch (error) {
+        // Log error, especially "Could not establish connection..." if the tab/script is gone
+        logMessage(`Error sending message to tab ${tabIdToSend}: ${error}`, 'error');
+        // Optionally re-throw or handle differently if needed
+        // throw error;
+    }
 }

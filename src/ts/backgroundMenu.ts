@@ -2,7 +2,8 @@ import { ProviderFactory } from './llmProviders/providerFactory'
 import { getConfigs, getCurrentMessageContent, logMessage, sendMessageToActiveTab } from './helpers/utils'
 
 // --- Global state for tracking open dialogs ---
-const pendingDialogs = new Map<number, string>(); // Map<windowId, promptId>
+// Map<windowId, { promptId: string; context: string | null; tabId: number | undefined; }>
+const pendingDialogs = new Map<number, { promptId: string; context: string | null; tabId: number | undefined; }>();
 
 // Create the menu entries -->
 const menuIdSummarize = messenger.menus.create({
@@ -195,6 +196,25 @@ const menuIdSuggestReplyPolite = messenger.menus.create({
         'compose_action_menu'
     ]
 })
+
+// --- Separator before Custom ---
+messenger.menus.create({
+    id: 'aiSuggestReplySeparator',
+    type: 'separator',
+    parentId: subMenuIdSuggestReply,
+    contexts: [
+        'compose_action_menu'
+    ]
+})
+
+const menuIdSuggestReplyCustom = messenger.menus.create({
+    id: 'aiSuggestReplyCustom',
+    title: browser.i18n.getMessage('mailSuggestReply.custom'),
+    parentId: subMenuIdSuggestReply,
+    contexts: [
+        'compose_action_menu'
+    ]
+})
 // <-- suggest reply submenu
 
 // Summarize submenu -->
@@ -326,6 +346,9 @@ messenger.menus.onClicked.addListener(async (info: browser.menus.OnClickData) =>
         menuIdSuggestReplyFormal, menuIdSuggestReplyAcademic, menuIdSuggestReplyExpanded, menuIdSuggestReplyShortened,
         menuIdSuggestReplyPolite].includes(info.menuItemId)) {
         handleSuggestReply(info, llmProvider)
+    }
+    else if (info.menuItemId === menuIdSuggestReplyCustom) {
+        handleSuggestCustomReply(info, llmProvider)
     }
     else if (info.menuItemId == menuIdSummarizeAndText2Speech) {
         handleSummarizeAndText2Speech(info, llmProvider)
@@ -539,7 +562,30 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
  */
 async function handleSuggestCustomReply(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
     logMessage('Opening custom reply dialog', 'log');
-    const promptId = 'customReplySuggest'; // Define promptId here
+    const promptId = 'customReplySuggest';
+
+    // --- Get context BEFORE opening dialog --- 
+    let initialContext: string | null = null;
+    let initialTabId: number | undefined = undefined;
+    try {
+        const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+        initialTabId = tabs[0]?.id;
+        if (!initialTabId) {
+            throw new Error("Could not get active tab ID for context.");
+        }
+        // Assuming getCurrentMessageContent works for compose context initially
+        initialContext = await getCurrentMessageContent();
+        if (initialContext === null) {
+            throw new Error("Could not get initial message context.");
+        }
+        logMessage(`Got initial context for tab ${initialTabId}`, 'log');
+    } catch (error) {
+        logMessage(`Failed to get initial context: ${error}`, 'error');
+        sendMessageToActiveTab({ type: 'showError', content: `Failed to get context: ${error.message}` });
+        return; // Don't proceed if context fetching fails
+    }
+    // --- End context fetching ---
+
     try {
         const params = new URLSearchParams({
             promptId: promptId,
@@ -557,9 +603,9 @@ async function handleSuggestCustomReply(info: browser.menus.OnClickData, llmProv
             height: 250
         });
 
-        // Track the opened dialog window
+        // Track the opened dialog window with context
         if (newWindow.id) {
-            pendingDialogs.set(newWindow.id, promptId);
+            pendingDialogs.set(newWindow.id, { promptId, context: initialContext, tabId: initialTabId }); // Store context & tabId
             logMessage(`Tracking dialog window ${newWindow.id} for prompt ${promptId}`, 'log');
         } else {
             logMessage('Could not get window ID for created dialog', 'warn');
@@ -573,66 +619,65 @@ async function handleSuggestCustomReply(info: browser.menus.OnClickData, llmProv
 
 /**
  * Handle suggesting a reply for selected or current message text
- * Now accepts optional custom instructions.
+ * Now accepts optional custom instructions and an optional targetTabId.
  */
-async function handleSuggestReply(info: browser.menus.OnClickData, llmProvider: any, customInstructions: string | null = null): Promise<void> {
-    sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') });
-    logMessage(`handling suggest reply (custom: ${!!customInstructions})`, 'log');
+async function handleSuggestReply(
+    info: browser.menus.OnClickData,
+    llmProvider: any,
+    customInstructions: string | null = null,
+    targetTabId?: number // Added optional tabId
+): Promise<void> {
+    // Use targetTabId if provided, otherwise try to find active tab (for non-dialog flows)
+    let effectiveTabId = targetTabId;
+    if (!effectiveTabId) {
+        try {
+            const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+            effectiveTabId = tabs[0]?.id;
+        } catch (e) { /* Ignore error, proceed without tab ID if necessary */ }
+    }
+
+    // Send thinking message TO THE SPECIFIC TAB if ID is known
+    sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') }, effectiveTabId);
+    logMessage(`handling suggest reply (custom: ${!!customInstructions}, tab: ${effectiveTabId})`, 'log');
 
     try {
-        // Use custom instructions if provided, otherwise get current message/selection
-        const textForSuggestion = customInstructions ? customInstructions : (info.selectionText ? info.selectionText : await getCurrentMessageContent());
+        // Use context from info.selectionText if customInstructions are provided (it was pre-filled)
+        // Otherwise, use selection or fetch current content.
+        const textForContext = customInstructions ? info.selectionText : (info.selectionText ? info.selectionText : await getCurrentMessageContent());
 
-        if (textForSuggestion == null && !customInstructions) { // Check needed only if not custom
-            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') });
+        if (textForContext == null) { // Simplified check
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') }, effectiveTabId);
             return;
         }
 
         let textSuggested: string;
 
         if (customInstructions) {
-            // Call a potentially different LLM method if we have custom instructions
-            // For now, let's assume suggestReplyFromText can handle it,
-            // perhaps by prepending the instructions to the context.
-            // OR, we might need a new llmProvider method like suggestCustomReply(context, instructions).
-            // Let's refine this later. For now, we pass null for tone and assume it uses the instructions.
-            const originalContext = (info.selectionText) ? info.selectionText : await getCurrentMessageContent();
-            if (!originalContext) {
-                sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') });
-                return;
-            }
-            // Placeholder: How to combine context and instructions? Depends on Provider.
-            // Let's assume a simple concatenation for now, needing refinement in the provider.
-            // We pass the original context (selection/message) and the custom instructions
-            // The LLM provider will need logic to understand this format.
-            textSuggested = await llmProvider.suggestReplyFromText(originalContext, null, customInstructions); // Pass tone as null, add custom instructions
-
+            // Pass the pre-filled context and custom instructions
+            textSuggested = await llmProvider.suggestReplyFromText(textForContext, null, customInstructions);
         } else {
-            // Original logic for predefined tones
+            // Original logic for predefined tones, using fetched/selected context
             const toneOfVoice = (info.menuItemId as string).substring(14).toLowerCase();
-            textSuggested = await llmProvider.suggestReplyFromText(textForSuggestion, toneOfVoice); // Original call
+            textSuggested = await llmProvider.suggestReplyFromText(textForContext, toneOfVoice);
         }
 
+        // Show the reply in the panel of THE SPECIFIC TAB
+        sendMessageToActiveTab({ type: 'addText', content: textSuggested }, effectiveTabId);
 
-        // Show the reply in the panel so it's visible to the user
-        sendMessageToActiveTab({ type: 'addText', content: textSuggested });
-
-        // Try to insert the reply into the compose window
-        try {
-            const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-            if (tabs[0]?.id) {
-                await insertReplyIntoComposeWindow(tabs[0].id, textSuggested);
-            } else {
-                logMessage('Could not find active tab ID to insert reply.', 'warn');
+        // Try to insert the reply into the compose window OF THE SPECIFIC TAB
+        if (effectiveTabId) {
+            try {
+                await insertReplyIntoComposeWindow(effectiveTabId, textSuggested);
+            } catch (error) {
+                logMessage(`Failed to insert reply automatically into tab ${effectiveTabId}: ${error}`, 'error');
+                sendMessageToActiveTab({ type: 'showError', content: `${messenger.i18n.getMessage('errorSuggestReplyInsertFailed')}: ${error.message}` }, effectiveTabId);
             }
-        } catch (error) {
-            // If insertion fails, the reply is already visible in the panel
-            // so the user can still copy it manually
-            logMessage(`Failed to insert reply automatically: ${error}`, 'error');
-            sendMessageToActiveTab({ type: 'showError', content: `${messenger.i18n.getMessage('errorSuggestReplyInsertFailed')}: ${error.message}` });
+        } else {
+            logMessage('Could not determine target tab ID to insert reply.', 'warn');
+            // Cannot insert without tab ID, but message was shown in panel if active tab was found earlier
         }
     } catch (error) {
-        sendMessageToActiveTab({ type: 'showError', content: error.message });
+        sendMessageToActiveTab({ type: 'showError', content: error.message }, effectiveTabId);
         logMessage(`Error during reply generation: ${error.message}`, 'error');
     }
 }
@@ -817,9 +862,7 @@ messenger.composeScripts.register({
     css: [{ file: '/messageDisplay/messageDisplayScripts.css' }]
 })
 
-// Listens for the message signaling the change in configurations to update the
-// interface.
-// Modified to handle custom reply submissions as well.
+// Update the message listener to handle generalized dialog responses
 browser.runtime.onMessage.addListener(async (message, sender) => {
     if (message.type === 'optionsChanged') {
         updateMenuVisibility()
@@ -830,53 +873,59 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
         logMessage(`Received dialog response: ${JSON.stringify(message)}`, 'log');
         const senderWindowId = sender.tab?.windowId;
 
+        // Check if we are tracking this dialog
+        if (!senderWindowId || !pendingDialogs.has(senderWindowId)) {
+            logMessage(`Received dialog response from untracked or invalid window ID: ${senderWindowId}`, 'warn');
+            return;
+        }
+
+        // Retrieve stored data and remove from tracking
+        const dialogData = pendingDialogs.get(senderWindowId);
+        pendingDialogs.delete(senderWindowId);
+        logMessage(`Retrieved and removed dialog data for window ${senderWindowId}`, 'log');
+
         // Route based on promptId
-        if (message.promptId === 'customReplySuggest') {
+        if (dialogData.promptId === 'customReplySuggest') {
             if (message.status === 'submitted' && message.value) {
-                // Remove from pending before processing, in case processing fails
-                if (senderWindowId && pendingDialogs.has(senderWindowId)) {
-                    pendingDialogs.delete(senderWindowId);
-                    logMessage(`Removed submitted dialog window ${senderWindowId} from tracking`, 'log');
+
+                // --- Use stored context and call handleSuggestReply ---
+                if (dialogData.context === null || dialogData.tabId === undefined) {
+                    logMessage(`Error: Stored context or tabId is invalid for prompt ${dialogData.promptId}`, 'error');
+                    sendMessageToActiveTab({ type: 'showError', content: 'Internal error: Could not retrieve original context.' });
+                    return;
                 }
 
-                // --- Call handleSuggestReply for custom input ---
                 const configs = await getConfigs();
                 const llmProvider = ProviderFactory.getInstance(configs);
                 try {
-                    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-                    const tabId = tabs[0]?.id;
-                    if (!tabId) {
-                        throw new Error("Could not get active tab ID for context.");
-                    }
-                    const currentContext = await getCurrentMessageContent();
-                    if (currentContext === null) {
-                        throw new Error(messenger.i18n.getMessage('errorTextNotFound'));
-                    }
+                    // Create dummy info object with STORED context
                     const dummyInfo: Partial<browser.menus.OnClickData> = {
                         menuItemId: menuIdSuggestReplyCustom,
-                        selectionText: currentContext
+                        selectionText: dialogData.context // Use stored context
                     };
-                    await handleSuggestReply(dummyInfo as browser.menus.OnClickData, llmProvider, message.value);
+                    // Call handleSuggestReply, passing the submitted value, stored context (via dummyInfo),
+                    // AND the stored tabId for targeting the reply insertion.
+                    await handleSuggestReply(dummyInfo as browser.menus.OnClickData, llmProvider, message.value, dialogData.tabId);
                 } catch (error) {
                     logMessage(`Error handling custom reply submission: ${error}`, 'error');
                     sendMessageToActiveTab({ type: 'showError', content: `Error processing custom reply: ${error.message}` });
                 }
                 // --- End custom reply handling ---
             }
-            // No need to handle status === 'cancelled' here anymore, onRemoved handles it
+            // No need to handle status === 'cancelled', onRemoved handles it
         }
         // --- Add more else if blocks here for other promptIds in the future ---
         else {
-            logMessage(`Received dialog response with unknown promptId: ${message.promptId}`, 'warn');
+            logMessage(`Received dialog response with unknown promptId: ${dialogData.promptId}`, 'warn');
         }
     }
     // Handle other message types if any...
-})
+});
 
 // --- Listener for window removal (handles cancellation) ---
 browser.windows.onRemoved.addListener((closedWindowId) => {
     if (pendingDialogs.has(closedWindowId)) {
-        const promptId = pendingDialogs.get(closedWindowId);
+        const { promptId, context, tabId } = pendingDialogs.get(closedWindowId);
         logMessage(`Dialog window ${closedWindowId} (prompt: ${promptId}) was closed without submitting. Treating as cancel.`, 'log');
 
         // Trigger cancellation logic based on promptId if needed

@@ -122,6 +122,10 @@
     "mailSuggestReply.standard": {
         "message": "Standard"
     },
+    "mailSuggestReply.custom": {
+        "message": "Personalizzata...",
+        "description": "Opzione di menu per suggerire una risposta basata su istruzioni utente personalizzate"
+    },
     "mailSummarize": {
         "message": "Riassumi"
     },
