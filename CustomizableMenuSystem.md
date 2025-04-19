@@ -80,7 +80,7 @@ The system will automatically:
 
 The system will support different response types:
 - Text: Standard text response displayed in panel
-- Audio: Text converted to speech and played
+- Audio: Text converted to speech and played (not important at all)
 - Other response types can be added in the future
 
 ## Default Configuration
@@ -101,14 +101,8 @@ To ensure a good out-of-box experience, the system will provide default menu con
 
 ## Considerations
 
-### Technical Considerations
-- Maintaining backward compatibility
-- Performance impact of dynamic menu generation
-- Ensuring all LLM providers support generic instruction processing
-
 ### UX Considerations
 - Making the hierarchy system intuitive for users
 - Providing clear feedback on menu operations
-- Supporting migration from the existing system
 
 By implementing this design, users will have full control over menu options and can provide custom instructions directly to the AI without being limited to predefined categories.

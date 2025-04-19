@@ -78,6 +78,7 @@
         "browser_style": false
     },
     "web_accessible_resources": [
-        "images/bot-icon-color-64.webp"
+        "images/bot-icon-color-64.webp",
+        "dialogs/customReplyDialog.html"
     ]
 }
