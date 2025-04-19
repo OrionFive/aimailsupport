@@ -58,6 +58,18 @@ cancelButton.addEventListener('click', () => {
     window.close();
 });
 
+// Add keydown listener to the textarea for Enter submission
+dialogInput.addEventListener('keydown', (event) => {
+    // Check if Enter was pressed without the Shift key
+    if (event.key === 'Enter' && !event.shiftKey) {
+        // Prevent the default action (inserting a newline)
+        event.preventDefault();
+        // Trigger the submit button's click event
+        submitButton.click();
+    }
+    // If Shift+Enter is pressed, the default behavior (newline) occurs
+});
+
 window.addEventListener('DOMContentLoaded', () => {
     // Parse URL parameters
     promptId = getUrlParameter('promptId');
