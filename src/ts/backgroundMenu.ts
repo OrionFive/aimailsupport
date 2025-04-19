@@ -411,6 +411,126 @@ async function handleRephrase(info: browser.menus.OnClickData, llmProvider: any)
 }
 
 /**
+ * Finds the starting index of the quoted text within email content.
+ * 
+ * @param content The email body content (plain text or HTML string).
+ * @param isPlainText Whether the content is plain text.
+ * @returns The starting index of the quote, or -1 if not found.
+ */
+function findQuoteStartIndex(content: string, isPlainText: boolean): number {
+    let quoteStartIndex = -1;
+
+    if (isPlainText) {
+        // Plain text quote detection logic
+        const headerRegex = /\n\s*(\bOn\b .+wrote:)/;
+        const headerMatch = headerRegex.exec(content);
+        if (headerMatch && headerMatch.index > -1) {
+            quoteStartIndex = headerMatch.index;
+            logMessage(`Found plain text header at index ${quoteStartIndex}`, 'log');
+        } else {
+            const dateRegex = /\n\s*(\bOn\b .+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/;
+            const dateMatch = dateRegex.exec(content);
+            if (dateMatch && dateMatch.index > -1) {
+                quoteStartIndex = dateMatch.index;
+                logMessage(`Found plain text date header at index ${quoteStartIndex}`, 'log');
+            } else {
+                const quoteRegex = /\n\s*(>[^\n]+\n\s*>[^\n]+)/; // Match multi-line quote
+                const quoteMatch = quoteRegex.exec(content);
+                if (quoteMatch && quoteMatch.index > -1) {
+                    quoteStartIndex = quoteMatch.index;
+                    logMessage(`Found plain text quote marker at index ${quoteStartIndex}`, 'log');
+                }
+            }
+        }
+    } else {
+        // HTML quote detection logic
+        // NOTE: This operates on the innerHTML of the body for simplicity here,
+        // assuming the caller handles the full document parsing if needed.
+        const headerRegex = /(\b(?:On|From|Date).+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/i;
+        const headerMatch = headerRegex.exec(content);
+        if (headerMatch && headerMatch.index > -1) {
+            quoteStartIndex = headerMatch.index;
+            logMessage(`Found HTML header at index ${quoteStartIndex}`, 'log');
+        } else {
+            const blockquoteIndex = content.indexOf('<blockquote');
+            if (blockquoteIndex !== -1) {
+                quoteStartIndex = blockquoteIndex;
+                logMessage(`Found blockquote at index ${quoteStartIndex}`, 'log');
+            } else {
+                const quoteIndex = content.indexOf('&gt;');
+                if (quoteIndex !== -1) {
+                    const lineStartIndex = content.lastIndexOf('<br', quoteIndex);
+                    quoteStartIndex = (lineStartIndex > -1) ? lineStartIndex : quoteIndex;
+                    logMessage(`Found HTML quote marker (&gt;) at index ${quoteIndex}, using index ${quoteStartIndex}`, 'log');
+                }
+            }
+        }
+    }
+
+    return quoteStartIndex;
+}
+
+/**
+ * Gets the content of the original message being replied to from a compose window.
+ * 
+ * @param tabId The ID of the tab containing the compose window.
+ * @returns A promise resolving to the original message content (quoted part), or null if not found.
+ */
+async function getOriginalMessageContext(tabId: number): Promise<string | null> {
+    try {
+        const details = await browser.compose.getComposeDetails(tabId);
+        const isPlainText = details.isPlainText;
+        let content = isPlainText ? details.plainTextBody : details.body;
+
+        if (!content) {
+            logMessage('No content found in compose window for context extraction', 'warn');
+            return null;
+        }
+
+        let quoteStartIndex = -1;
+        if (isPlainText) {
+            quoteStartIndex = findQuoteStartIndex(content, true);
+        } else {
+            // For HTML, we need to find the index within the body's innerHTML
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(content, 'text/html');
+            const bodyElement = doc.body;
+            if (bodyElement) {
+                quoteStartIndex = findQuoteStartIndex(bodyElement.innerHTML, false);
+                // If quote found, get the substring from the *original* HTML content
+                if (quoteStartIndex > -1) {
+                    // This might need refinement - ideally, we'd get the substring 
+                    // from the *serialized* original body HTML starting at the 
+                    // equivalent index. For now, let's return the innerHTML substring.
+                    // TODO: Re-evaluate if returning raw innerHTML substring is sufficient.
+                    content = bodyElement.innerHTML; // Use innerHTML for substring operation
+                }
+            } else {
+                logMessage('Could not parse body element from HTML content', 'warn');
+                // Fallback: try finding quote in the raw HTML string
+                quoteStartIndex = findQuoteStartIndex(content, false);
+            }
+        }
+
+        if (quoteStartIndex > -1) {
+            let originalMessage = content.substring(quoteStartIndex);
+            // Remove a single leading newline if present, as findQuoteStartIndex might include it.
+            if (originalMessage.startsWith('\n')) {
+                originalMessage = originalMessage.substring(1);
+            }
+            logMessage(`Extracted original message context starting at index ${quoteStartIndex}`, 'log');
+            return originalMessage;
+        } else {
+            logMessage('Could not find quote start index in compose window', 'warn');
+            return null; // Indicate no original message context found
+        }
+    } catch (error) {
+        logMessage(`Error getting original message context: ${error}`, 'error');
+        return null; // Return null on error
+    }
+}
+
+/**
  * Inserts text into the compose window before the quoted email.
  * 
  * @param tabId The ID of the tab containing the compose window
@@ -429,6 +549,8 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
         let content = details.isPlainText ? details.plainTextBody : details.body;
         if (!content) {
             logMessage('No content found in compose window', 'log');
+            // If no content, just insert the reply directly
+            await browser.compose.setComposeDetails(tabId, details.isPlainText ? { plainTextBody: replyText } : { body: replyText });
             return;
         }
 
@@ -444,27 +566,7 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
 
         if (details.isPlainText) {
             // For plain text, find the start of the quote
-            let quoteStartIndex = -1;
-            const headerRegex = /\n\s*(\bOn\b .+wrote:)/;
-            const headerMatch = headerRegex.exec(content);
-            if (headerMatch && headerMatch.index > -1) {
-                quoteStartIndex = headerMatch.index;
-                logMessage(`Found plain text header at index ${quoteStartIndex}`, 'log');
-            } else {
-                const dateRegex = /\n\s*(\bOn\b .+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/;
-                const dateMatch = dateRegex.exec(content);
-                if (dateMatch && dateMatch.index > -1) {
-                    quoteStartIndex = dateMatch.index;
-                    logMessage(`Found plain text date header at index ${quoteStartIndex}`, 'log');
-                } else {
-                    const quoteRegex = /\n\s*(>[^\n]+\n\s*>[^\n]+)/; // Match multi-line quote
-                    const quoteMatch = quoteRegex.exec(content);
-                    if (quoteMatch && quoteMatch.index > -1) {
-                        quoteStartIndex = quoteMatch.index;
-                        logMessage(`Found plain text quote marker at index ${quoteStartIndex}`, 'log');
-                    }
-                }
-            }
+            const quoteStartIndex = findQuoteStartIndex(content, true);
 
             // Construct the new content
             let newContent;
@@ -474,8 +576,8 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
                 newContent = formattedReply + '\n\n' + quotePart;
             } else {
                 // No quote found, just use the new reply
-                logMessage('No quote indicators found in plain text, using just our reply', 'log');
-                newContent = formattedReply;
+                logMessage('No quote indicators found in plain text, inserting reply at the beginning', 'log');
+                newContent = formattedReply + '\n\n' + content; // Insert before existing content
             }
             await browser.compose.setComposeDetails(tabId, { plainTextBody: newContent });
 
@@ -494,26 +596,7 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
             let quoteStartIndex = -1;
 
             // Find the start of the quote in HTML
-            const headerRegex = /(\b(?:On|From|Date).+\d{1,4}[\/,-]\d{1,2}[\/,-]\d{1,4})/i;
-            const headerMatch = headerRegex.exec(bodyHTML);
-            if (headerMatch && headerMatch.index > -1) {
-                quoteStartIndex = headerMatch.index;
-                logMessage(`Found HTML header at index ${quoteStartIndex}`, 'log');
-            } else {
-                const blockquoteIndex = bodyHTML.indexOf('<blockquote');
-                if (blockquoteIndex !== -1) {
-                    quoteStartIndex = blockquoteIndex;
-                    logMessage(`Found blockquote at index ${quoteStartIndex}`, 'log');
-                } else {
-                    const quoteIndex = bodyHTML.indexOf('&gt;');
-                    if (quoteIndex !== -1) {
-                        // Try to find the start of the line containing &gt;
-                        const lineStartIndex = bodyHTML.lastIndexOf('<br', quoteIndex);
-                        quoteStartIndex = (lineStartIndex > -1) ? lineStartIndex : quoteIndex; // Prefer start of line
-                        logMessage(`Found HTML quote marker (&gt;) at index ${quoteIndex}, using index ${quoteStartIndex}`, 'log');
-                    }
-                }
-            }
+            quoteStartIndex = findQuoteStartIndex(bodyHTML, false);
 
             // Construct the new HTML content
             let newBodyHTML;
@@ -523,8 +606,8 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
                 newBodyHTML = formattedReply + '<br>' + quotePart; // Add break before quote
             } else {
                 // No quote found, just use the new reply
-                logMessage('No quote indicators found in HTML, using just our reply', 'log');
-                newBodyHTML = formattedReply;
+                logMessage('No quote indicators found in HTML, inserting reply at the beginning', 'log');
+                newBodyHTML = formattedReply + '<br>' + bodyHTML; // Insert before existing content
             }
 
             // Update the body and set the details
@@ -559,10 +642,16 @@ async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvide
         if (!initialTabId) {
             throw new Error("Could not get active tab ID for context.");
         }
-        initialContext = await getCurrentMessageContent(); // Use current message as context
+        // initialContext = await getCurrentMessageContent(); // Use current message as context
+        // Use the new function to get only the original message context
+        initialContext = await getOriginalMessageContext(initialTabId);
+
         if (initialContext === null) {
             // Don't throw error, proceed without context if necessary, but log it
-            logMessage("Could not get initial message context.", 'warn');
+            logMessage("Could not find/extract original message context from compose window.", 'warn');
+            // Optionally, inform the user immediately
+            // sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorOriginalContextNotFound') });
+            // return; // Or decide to proceed without context depending on desired UX
         }
         logMessage(`Got initial context for tab ${initialTabId}`, 'log');
     } catch (error) {
@@ -815,7 +904,7 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
         // Retrieve stored data and remove from tracking
         const dialogData = pendingDialogs.get(senderWindowId);
         pendingDialogs.delete(senderWindowId);
-        logMessage(`Retrieved and removed dialog data for window ${senderWindowId}: ${JSON.stringify(dialogData)}`, 'log');
+        logMessage(`Retrieved and removed dialog data for window ${senderWindowId}.`, 'log');
 
         if (!dialogData) { // Should not happen if .has check passes, but good practice
             logMessage(`Error: No dialog data found for window ID ${senderWindowId}`, 'error');
@@ -824,7 +913,8 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
 
         // --- Route based on promptId prefix ---
         if (dialogData.promptId.startsWith('suggestReply-')) {
-            if (message.status === 'submitted' && message.value) {
+            // Allow submission even if the value (custom instructions) is empty
+            if (message.status === 'submitted') {
                 logMessage(`Processing submitted suggest reply: type=${dialogData.replyType}, tabId=${dialogData.tabId}`, 'log');
 
                 // Ensure we have necessary data
@@ -845,6 +935,14 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
                 const replyType = dialogData.replyType; // Use stored reply type
                 const customInstructions = message.value; // User input from dialog
 
+                // === Pre-LLM Check ===
+                // Ensure we have context to reply to before calling the LLM
+                if (!textForContext || textForContext.trim() === '') {
+                    logMessage(`Error: Cannot suggest reply for tab ${effectiveTabId}. Original message context is missing or empty.`, 'error');
+                    sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorSuggestReplyNoContext') }, effectiveTabId);
+                    return; // Stop processing
+                }
+
                 // Send thinking message TO THE SPECIFIC TAB 
                 sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') }, effectiveTabId);
 
@@ -854,7 +952,7 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
 
                     // Call LLM provider with context, type, and custom instructions
                     logMessage(`Calling LLM provider with context: ${textForContext}, type: ${replyType}, customInstructions: ${customInstructions}`, 'log');
-                    const textSuggested = await llmProvider.suggestReplyFromText(textForContext, replyType/* TODO: , customInstructions */);
+                    const textSuggested = await llmProvider.suggestReplyFromText(textForContext, replyType, customInstructions);
 
                     // Show the reply in the panel of THE SPECIFIC TAB
                     sendMessageToActiveTab({ type: 'addText', content: textSuggested }, effectiveTabId);
