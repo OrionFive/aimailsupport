@@ -34,9 +34,17 @@ export class ProviderFactory {
      * @param config - The configuration object specifying the desired provider.
      *
      * @returns An instance of the specified AI LLM provider.
+     *
+     * @throws Error if the configured llmProvider is invalid or not supported.
      */
     static getInstance(config: ConfigType): GenericProvider {
-        const ProviderClass = providerMap[config.llmProvider] || GenericProvider
+        const providerName = config.llmProvider;
+        if (!providerName || !(providerName in providerMap)) {
+            // Throw an error if the provider name is missing, null, or not in our map
+            throw new Error(`Invalid or unsupported LLM provider specified in configuration: ${providerName}`);
+        }
+        const ProviderClass = providerMap[providerName];
+        // Now we are sure ProviderClass is a valid, concrete class
         return new ProviderClass(config)
     }
 }

@@ -1,6 +1,6 @@
 import { GenericProvider } from '../genericProvider'
 import { ConfigType } from '../../helpers/configType'
-import { getLanguageNameFromCode, logMessage } from '../../helpers/utils'
+import { logMessage } from '../../helpers/utils'
 
 /**
  * Class with the implementation of methods useful for interfacing with the
@@ -24,46 +24,6 @@ export class AnthropicClaudeProvider extends GenericProvider {
         this.model = config.anthropic.model
     }
 
-    public async rephraseText(input: string, toneOfVoice: string): Promise<string> {
-        logMessage(`Request to use the tone of voice "${toneOfVoice}" to rephrase the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.REPHRASE.replace('%s', toneOfVoice), input)
-    }
-
-    public async suggestImprovementsForText(input: string): Promise<string> {
-        logMessage(`Request suggest improvements for the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUGGEST_IMPROVEMENTS, input)
-    }
-
-    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
-        logMessage(`Request to suggest a reply to the text: ${input}${customInstructions ? ' with custom instructions: ' + customInstructions : ''}`, 'debug')
-
-        let prompt = this.PROMPTS.SUGGEST_REPLY;
-        if (customInstructions) {
-            // Anthropic uses 'system' prompt for instructions
-            prompt += `\n\nFollow these additional instructions/comments from the recipient: ${customInstructions}`;
-        }
-
-        return this.manageMessageContent(prompt, input)
-    }
-
-    public async summarizeText(input: string): Promise<string> {
-        logMessage(`Request to summarize the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUMMARIZE, input)
-    }
-
-    public async testIntegration(): Promise<void> {
-        await this.translateText('Hi!')
-    }
-
-    public async translateText(input: string): Promise<string> {
-        logMessage(`Request to translate in ${getLanguageNameFromCode(this.mainUserLanguageCode)} the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.TRANSLATE.replace('%s', getLanguageNameFromCode(this.mainUserLanguageCode)), input)
-    }
-
     /**
      * Function to generate headers for API requests.
      *
@@ -80,32 +40,36 @@ export class AnthropicClaudeProvider extends GenericProvider {
     }
 
     /**
-     * This asynchronous method manages message content by sending a request
-     * to the Anthropic API using the provided system and user input.
-     * It constructs a POST request with the relevant model and message data,
-     * manages the request with a timeout signal, and processes the response.
+     * Executes a prompt using the Anthropic API.
      *
-     * If the request is successful, it returns the content of the response
-     * message.
-     * In case of failure, it throws an error with the specific message from
-     * the Anthropic API.
+     * Implements the abstract method from GenericProvider.
+     * It constructs a POST request with the model, temperature, system prompt
+     * (potentially augmented with custom instructions), and user input.
+     * Handles the API response and errors.
      *
-     * @param systemInput - The input for the 'system' role in the conversation.
-     * @param userInput - The input for the 'user' role in the conversation.
+     * @param systemPrompt - The base system prompt (e.g., task description).
+     * @param userInput - The main user input text.
+     * @param customInstructions - Optional additional instructions.
      *
-     * @returns A promise that resolves to the content of the response message
-     *          from the API.
+     * @returns A promise that resolves to the text content of the API response.
      *
      * @throws An error if the API response is not successful.
      */
-    private async manageMessageContent(systemInput: string, userInput: string): Promise<string> {
+    protected async _executePrompt(systemPrompt: string, userInput: string, customInstructions?: string): Promise<string> {
         const { signal, clearAbortSignalWithTimeout } = this.createAbortSignalWithTimeout(this.servicesTimeout)
+
+        let finalSystemPrompt = systemPrompt;
+        if (customInstructions) {
+            // Anthropic uses the 'system' parameter for instructions.
+            // Append custom instructions to the base system prompt.
+            finalSystemPrompt += `\n\nAdditional instructions: ${customInstructions}`;
+            logMessage(`Anthropic: Appending custom instructions to system prompt.`, 'debug')
+        }
 
         const requestData = JSON.stringify({
             'model': this.model,
             'temperature': this.temperature,
-            'max_tokens': 2048,
-            'system': systemInput,
+            'system': finalSystemPrompt,
             'messages': [
                 { 'role': 'user', 'content': userInput }
             ]
@@ -119,15 +83,42 @@ export class AnthropicClaudeProvider extends GenericProvider {
             signal: signal
         }
 
-        const response = await fetch('https://api.anthropic.com/v1/messages', requestOptions)
-        clearAbortSignalWithTimeout()
+        try {
+            logMessage(`Anthropic: Sending request to model ${this.model} with system prompt: "${finalSystemPrompt.substring(0, 100)}..."`, 'debug');
+            const response = await fetch('https://api.anthropic.com/v1/messages', requestOptions)
+            clearAbortSignalWithTimeout()
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`Anthropic error: ${errorResponse.error.message}`)
+            if (!response.ok) {
+                let errorMsg = `Anthropic API error: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `Anthropic API error: ${errorResponse?.error?.type} - ${errorResponse?.error?.message}`;
+                } catch (jsonError) {
+                    logMessage('Anthropic: Failed to parse error response JSON.', 'warn');
+                    // Use the initial status text error message
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage(`Anthropic: Received response.`, 'debug')
+            // Ensure content exists and has text
+            if (responseData.content && responseData.content.length > 0 && responseData.content[0].text) {
+                return responseData.content[0].text
+            } else {
+                logMessage('Anthropic: Received empty or unexpected response format.', 'warn')
+                return ''; // Return empty string for unexpected format
+            }
+        } catch (error) {
+            clearAbortSignalWithTimeout()
+            if (error instanceof Error && error.name === 'AbortError') {
+                logMessage('Anthropic: Request timed out.', 'error')
+                throw new Error('Anthropic request timed out.');
+            }
+            logMessage(`Anthropic: Request failed - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            // Rethrow the original error or a generic one
+            throw error instanceof Error ? error : new Error('Anthropic request failed');
         }
-
-        const responseData = await response.json()
-        return responseData.content[0].text
     }
 }

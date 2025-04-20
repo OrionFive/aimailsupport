@@ -1,6 +1,6 @@
 import { GenericProvider } from '../genericProvider'
 import { ConfigType } from '../../helpers/configType'
-import { getLanguageNameFromCode, logMessage } from '../../helpers/utils'
+import { logMessage } from '../../helpers/utils'
 
 /**
  * Class with the implementation of methods useful for interfacing with the
@@ -20,106 +20,56 @@ export class GoogleGeminiProvider extends GenericProvider {
         this.model = config.google.model
     }
 
-    public async rephraseText(input: string, toneOfVoice: string): Promise<string> {
-        logMessage(`Request to use the tone of voice "${toneOfVoice}" to rephrase the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.REPHRASE.replace('%s', toneOfVoice), input)
-    }
-
-    public async suggestImprovementsForText(input: string): Promise<string> {
-        logMessage(`Request suggest improvements for the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUGGEST_IMPROVEMENTS, input)
-    }
-
-    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
-        logMessage(`Request to suggest a reply to the text: ${input}${customInstructions ? ' with custom instructions: ' + customInstructions : ''}`, 'debug')
-
-        let prompt = this.PROMPTS.SUGGEST_REPLY;
-        if (customInstructions) {
-            prompt += `\n\nFollow these additional instructions/comments from the recipient: ${customInstructions}`;
-        }
-
-        return this.manageMessageContent(prompt, input)
-    }
-
-    public async summarizeText(input: string): Promise<string> {
-        logMessage(`Request to summarize the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUMMARIZE, input)
-    }
-
-    public async testIntegration(): Promise<void> {
-        await this.translateText('Hi!')
-    }
-
-    public async translateText(input: string): Promise<string> {
-        logMessage(`Request to translate in ${getLanguageNameFromCode(this.mainUserLanguageCode)} the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.TRANSLATE.replace('%s', getLanguageNameFromCode(this.mainUserLanguageCode)), input)
-    }
 
     /**
      * Function to generate headers for API requests.
+     * Note: Google Gemini API uses API key in URL query parameter.
      *
      * @returns {Headers} The headers object with necessary headers appended.
      */
     private getHeader(): Headers {
         const headers: Headers = new Headers()
         headers.append('Content-Type', 'application/json')
-
         return headers
     }
 
     /**
-     * This asynchronous method manages message content by sending a request
-     * to the Gogole AI API using the provided system and user input.
-     * It constructs a POST request with the relevant model and message data,
-     * manages the request with a timeout signal, and processes the response.
+     * Executes a prompt using the Google Gemini API.
      *
-     * If the request is successful, it returns the content of the response
-     * message.
-     * In case of failure, it throws an error with the specific message from
-     * the Gogole AI API.
+     * Implements the abstract method from GenericProvider.
+     * Constructs a POST request using Gemini's specific format (system_instruction,
+     * contents, safety_settings), handles custom instructions by appending them
+     * to the system instruction, and processes the API response, including safety checks.
      *
-     * @param systemInput - The input for the 'system' role in the conversation.
-     * @param userInput - The input for the 'user' role in the conversation.
+     * @param systemPrompt - The base system prompt.
+     * @param userInput - The main user input text.
+     * @param customInstructions - Optional additional instructions.
      *
-     * @returns A promise that resolves to the content of the response message
-     *          from the API.
+     * @returns A promise that resolves to the text content of the API response.
      *
-     * @throws An error if the API response is not successful.
+     * @throws An error if the API response is not successful, times out, or blocked by safety settings.
      */
-    private async manageMessageContent(systemInput: string, userInput: string): Promise<string> {
+    protected async _executePrompt(systemPrompt: string, userInput: string, customInstructions?: string): Promise<string> {
         const { signal, clearAbortSignalWithTimeout } = this.createAbortSignalWithTimeout(this.servicesTimeout)
+
+        let finalSystemPrompt = systemPrompt;
+        if (customInstructions) {
+            finalSystemPrompt += `\n\nAdditional instructions: ${customInstructions}`;
+            logMessage(`Google Gemini: Appending custom instructions to system prompt.`, 'debug')
+        }
 
         const requestData = JSON.stringify({
             'system_instruction': {
-                'parts': { 'text': systemInput }
+                'parts': [{ 'text': finalSystemPrompt }]
             },
-            'contents': {
-                'parts': { 'text': userInput }
-            },
-            // All thresholds are disabled to avoid interference with the use of
-            // various LLM functions.
-            // https://ai.google.dev/gemini-api/docs/safety-settings
+            'contents': [
+                { 'role': 'user', 'parts': [{ 'text': userInput }] }
+            ],
             'safety_settings': [
-                {
-                    'category': 'HARM_CATEGORY_HARASSMENT',
-                    'threshold': 'BLOCK_NONE'
-                },
-                {
-                    'category': "HARM_CATEGORY_HATE_SPEECH",
-                    'threshold': "BLOCK_NONE"
-                },
-                {
-                    'category': "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    'threshold': "BLOCK_NONE"
-                },
-                {
-                    'category': "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    'threshold': "BLOCK_NONE"
-                }
+                { 'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_NONE' },
+                { 'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_NONE' },
+                { 'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_NONE' },
+                { 'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE' }
             ],
             'generationConfig': {
                 'temperature': this.temperature
@@ -134,24 +84,60 @@ export class GoogleGeminiProvider extends GenericProvider {
             signal: signal
         }
 
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`, requestOptions)
-        clearAbortSignalWithTimeout()
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`Google AI error: ${errorResponse.error.message}`)
+        try {
+            logMessage(`Google Gemini: Sending request to model ${this.model} with system prompt: "${finalSystemPrompt.substring(0, 100)}..."`, 'debug');
+            const response = await fetch(endpoint, requestOptions)
+            clearAbortSignalWithTimeout()
+
+            if (!response.ok) {
+                let errorMsg = `Google Gemini API error: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `Google Gemini API error: ${errorResponse?.error?.message || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('Google Gemini: Failed to parse error response JSON.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage(`Google Gemini: Received response.`, 'debug')
+
+            const candidate = responseData?.candidates?.[0];
+            if (candidate?.finishReason === 'SAFETY') {
+                const safetyRatings = candidate.safetyRatings?.map((r: any) => `${r.category}: ${r.probability}`).join(', ') || 'No details';
+                const errorMsg = browser.i18n.getMessage('errorGoogleGeminiSafetyThresholdExceeded') + ` (Details: ${safetyRatings})`;
+                logMessage(`Google Gemini: Content blocked due to safety settings. Reason: ${candidate.finishReason}. Ratings: ${safetyRatings}`, 'warn')
+                throw new Error(errorMsg)
+            }
+            if (candidate?.finishReason === 'RECITATION') {
+                logMessage('Google Gemini: Content blocked due to recitation policy.', 'warn')
+                throw new Error('Google Gemini: Response blocked due to recitation policy.');
+            }
+            if (!candidate?.content?.parts?.[0]?.text) {
+                logMessage(`Google Gemini: Received empty or unexpected response format. Finish reason: ${candidate?.finishReason || 'N/A'}`, 'warn')
+                if (candidate?.finishReason && candidate.finishReason !== 'STOP') {
+                    throw new Error(`Google Gemini: Response generation stopped unexpectedly. Reason: ${candidate.finishReason}`);
+                }
+                return '';
+            }
+
+            return candidate.content.parts[0].text
+
+        } catch (error) {
+            clearAbortSignalWithTimeout()
+            if (error instanceof Error && (error.message.includes('safety settings') || error.message.includes('recitation policy') || error.message.includes('stopped unexpectedly'))) {
+                throw error;
+            }
+            if (error instanceof Error && error.name === 'AbortError') {
+                logMessage('Google Gemini: Request timed out.', 'error')
+                throw new Error('Google Gemini request timed out.');
+            }
+            logMessage(`Google Gemini: Request failed - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            throw error instanceof Error ? error : new Error('Google Gemini request failed');
         }
-
-        const responseData = await response.json()
-
-        // Check the response from the Google AI model for any safety-related
-        // issues, if the finishReason is 'SAFETY', it indicates that the safety
-        // threshold has been exceeded.
-        // Reference: https://ai.google.dev/gemini-api/docs/safety-settings
-        if (responseData.candidates[0].finishReason == 'SAFETY') {
-            throw new Error(`Google AI error: ${browser.i18n.getMessage('errorGoogleGeminiSafetyThresholdExceeded')}`)
-        }
-
-        return responseData.candidates[0].content.parts[0].text
     }
 }

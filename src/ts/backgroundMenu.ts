@@ -1,5 +1,8 @@
 import { ProviderFactory } from './llmProviders/providerFactory'
 import { getConfigs, getCurrentMessageContent, logMessage, sendMessageToActiveTab } from './helpers/utils'
+import { GenericProvider } from './llmProviders/genericProvider'
+import { LlmService } from './llmProviders/llmService'
+import { PromptManager } from './llmProviders/promptManager'
 
 // --- Global state for tracking open dialogs ---
 // Map<windowId, { promptId: string; context: string | null; tabId: number | undefined; }>
@@ -327,40 +330,45 @@ updateMenuVisibility()
 // Register a listener for the menus.onClicked events
 messenger.menus.onClicked.addListener(async (info: browser.menus.OnClickData) => {
     const configs = await getConfigs()
-    const llmProvider = ProviderFactory.getInstance(configs)
 
+    // --- Create LlmService instance ---
+    const promptManager = new PromptManager();
+    const provider = ProviderFactory.getInstance(configs);
+    const llmService = new LlmService(provider, promptManager, configs);
+
+    // Pass llmService to handlers
     if (info.menuItemId == menuIdSummarize) {
-        handleSummarize(info, llmProvider)
+        handleSummarize(info, llmService)
     }
     else if ([menuIdRephraseStandard, menuIdRephraseFluid, menuIdRephraseCreative, menuIdRephraseSimple,
         menuIdRephraseFormal, menuIdRephraseAcademic, menuIdRephraseExpanded, menuIdRephraseShortened,
         menuIdRephrasePolite].includes(info.menuItemId)) {
-        handleRephrase(info, llmProvider)
+        handleRephrase(info, llmService)
     }
     else if (info.menuItemId === menuIdSuggestReply) {
-        promptForSuggestReply(info, llmProvider)
+        promptForSuggestReply(info, llmService)
     }
     else if (info.menuItemId == menuIdSummarizeAndText2Speech) {
-        handleSummarizeAndText2Speech(info, llmProvider)
+        handleSummarizeAndText2Speech(info, llmService)
     }
     else if (info.menuItemId == menuIdText2Speech) {
-        handleText2Speech(info, llmProvider)
+        handleText2Speech(info, llmService)
     }
     else if (info.menuItemId == menuIdTranslate) {
-        handleTranslate(info, llmProvider)
+        handleTranslate(info, llmService)
     }
     else if (info.menuItemId == menuIdTranslateAndSummarize) {
-        handleTranslateAndSummarize(info, llmProvider)
+        handleTranslateAndSummarize(info, llmService)
     }
     else if (info.menuItemId == menuIdTranslateAndText2Speech) {
-        handleTranslateAndText2Speech(info, llmProvider)
+        handleTranslateAndText2Speech(info, llmService)
     }
     else if (info.menuItemId == menuIdModerate) {
-        handleModerate(info, llmProvider)
+        handleModerate(info, llmService)
     }
     /* 
     else if (info.menuItemId == menuIdSuggestImprovements) {
-        handleSuggestImprovements(info, llmProvider)
+        handleSuggestImprovements(info, llmService)
     }
     */
     // Fallback message case, but only if the menu does not match any values to
@@ -373,49 +381,59 @@ messenger.menus.onClicked.addListener(async (info: browser.menus.OnClickData) =>
 /**
  * Handle summarization of selected or current message text
  */
-async function handleSummarize(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function handleSummarize(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
 
-    const textToSummarize = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
+    try {
+        const textToSummarize = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
 
-    if (textToSummarize == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        llmProvider.summarizeText(textToSummarize).then(textSummarized => {
-            sendMessageToActiveTab({ type: 'addText', content: textSummarized })
-        }).catch(error => {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during summarization: ${error.message}`, 'error')
-        })
+        if (textToSummarize == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
+            return;
+        }
+
+        const textSummarized = await llmService.summarizeText(textToSummarize)
+        sendMessageToActiveTab({ type: 'addText', content: textSummarized })
+
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error instanceof Error ? error.message : 'Summarization failed' })
+        logMessage(`Error during summarization: ${error}`, 'error')
     }
 }
 
 /**
  * Handle rephrasing of selected or current message text
  */
-async function handleRephrase(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function handleRephrase(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
 
-    const textToRephrase = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
+    try {
+        const textToRephrase = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
 
-    if (textToRephrase == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        // Extracts the tone of voice from the menuItemId by taking a substring
-        // starting from the 10th character.
-        // The value 10 corresponds to the length of the string 'aiRephrase',
-        // allowing the code to retrieve the portion of the menuItemId that
-        // follows 'aiRephrase'.
-        const toneOfVoice = (info.menuItemId as string).substring(10).toLowerCase()
+        if (textToRephrase == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
+            return;
+        }
 
-        llmProvider.rephraseText(textToRephrase, toneOfVoice).then(textRephrased => {
-            sendMessageToActiveTab({ type: 'addText', content: textRephrased })
-        }).catch(error => {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during rephrasing: ${error.message}`, 'error')
-        })
+        const originalItemId = String(info.menuItemId);
+        const lowerCaseItemId = originalItemId.toLowerCase();
+        const toneOfVoice = lowerCaseItemId.replace('airephrase', ''); // Ensure lowercase for comparison
+
+        // Assertion: Check if tone is empty OR if replace did nothing
+        if (!toneOfVoice || toneOfVoice === lowerCaseItemId) {
+            logMessage(`Failed to extract valid tone of voice from menu item ID: ${originalItemId}`, 'error');
+            sendMessageToActiveTab({ type: 'showError', content: `Internal error: Could not determine rephrase tone for menu item ${originalItemId}` });
+            // No need to throw here, just stop processing for this action
+            return;
+        }
+
+        logMessage(`Request to rephrase with tone "${toneOfVoice}": ${textToRephrase}`, 'debug')
+        const textRephrased = await llmService.rephraseText(textToRephrase, toneOfVoice) // Use service and await
+        sendMessageToActiveTab({ type: 'addText', content: textRephrased })
+
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error instanceof Error ? error.message : 'Rephrasing failed' })
+        logMessage(`Error during rephrasing: ${error}`, 'error')
     }
 }
 
@@ -635,7 +653,7 @@ async function insertReplyIntoComposeWindow(tabId: number, replyText: string): P
 /**
  * Opens a popup window to get custom reply instructions based on the selected reply type.
  */
-async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function promptForSuggestReply(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     const promptId = `suggestReply-${Date.now()}`; // Simpler unique prompt ID
 
     logMessage(`Opening suggest reply dialog`, 'log');
@@ -649,31 +667,30 @@ async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvide
         if (!initialTabId) {
             throw new Error("Could not get active tab ID for context.");
         }
-        // initialContext = await getCurrentMessageContent(); // Use current message as context
-        // Use the new function to get only the original message context
         initialContext = await getOriginalMessageContext(initialTabId);
 
         if (initialContext === null) {
-            // Don't throw error, proceed without context if necessary, but log it
             logMessage("Could not find/extract original message context from compose window.", 'warn');
-            // Optionally, inform the user immediately
-            // sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorOriginalContextNotFound') });
-            // return; // Or decide to proceed without context depending on desired UX
         }
         logMessage(`Got initial context for tab ${initialTabId}`, 'log');
     } catch (error) {
         logMessage(`Failed to get initial context: ${error}`, 'error');
-        sendMessageToActiveTab({ type: 'showError', content: `Failed to get context: ${error.message}` });
+        // Send error message using the helper function for consistency
+        sendMessageToActiveTab({ type: 'showError', content: `Failed to get context: ${error instanceof Error ? error.message : 'Unknown error'}` });
         return; // Don't proceed if context fetching fails
     }
     // --- End context fetching ---
 
-    try {
-        // Get the title of the clicked menu item to use as the dialog label
-        // Reconstruct the i18n key and fetch the localized title
-        let dialogTitle = browser.i18n.getMessage('customReplyDialogTitle');
+    // --- Pre-check before opening dialog --- 
+    // Ensure we have context to reply to before even opening the dialog
+    if (!initialContext || initialContext.trim() === '') {
+        logMessage(`Error: Cannot suggest reply for tab ${initialTabId}. Original message context is missing or empty.`, 'error');
+        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorSuggestReplyNoContext') }, initialTabId);
+        return; // Stop processing
+    }
 
-        // Use the new generic label key
+    try {
+        let dialogTitle = browser.i18n.getMessage('customReplyDialogTitle');
         let dialogLabel = browser.i18n.getMessage('customReplyDialogInstructionLabel');
 
         const params = new URLSearchParams({
@@ -688,11 +705,10 @@ async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvide
         const newWindow = await browser.windows.create({
             url: dialogUrl,
             type: 'popup',
-            width: 450, // Slightly wider default
+            width: 450,
             height: 300
         });
 
-        // Track the opened dialog window with context and reply type
         if (newWindow.id) {
             pendingDialogs.set(newWindow.id, {
                 promptId,
@@ -702,167 +718,160 @@ async function promptForSuggestReply(info: browser.menus.OnClickData, llmProvide
             logMessage(`Tracking dialog window ${newWindow.id} for prompt ${promptId}`, 'log');
         } else {
             logMessage('Could not get window ID for created dialog', 'warn');
+            // Attempt to show error on the original tab
+            if (initialTabId) {
+                sendMessageToActiveTab({ type: 'showError', content: 'Failed to track reply dialog.' }, initialTabId);
+            }
         }
 
     } catch (error) {
         logMessage(`Error opening suggest reply dialog: ${error}`, 'error');
-        sendMessageToActiveTab({ type: 'showError', content: `Error opening dialog: ${error.message}` });
+        // Attempt to show error on the original tab
+        if (initialTabId) {
+            sendMessageToActiveTab({ type: 'showError', content: `Error opening dialog: ${error instanceof Error ? error.message : 'Unknown error'}` }, initialTabId);
+        } else {
+            // Fallback if tab ID wasn't obtained
+            alert(`Error opening dialog: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
     }
 }
 
 /**
  * Handle summarize and text-to-speech of selected or current message text
  */
-async function handleSummarizeAndText2Speech(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function handleSummarizeAndText2Speech(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
 
-    const textToProcess = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
+    try {
+        const textToProcess = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
 
-    if (textToProcess == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        try {
-            const textSummarized = await llmProvider.summarizeText(textToProcess)
-            const blob = await llmProvider.getSpeechFromText(textSummarized)
-
-            sendMessageToActiveTab({ type: 'addAudio', content: blob })
-        } catch (error) {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during summarization and text-to-speech: ${error.message}`, 'error')
+        if (textToProcess == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
+            return;
         }
+        const textSummarized = await llmService.summarizeText(textToProcess)
+        const blob = await llmService.getSpeechFromText(textSummarized)
+
+        sendMessageToActiveTab({ type: 'addAudio', content: blob })
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error instanceof Error ? error.message : 'Summarize & Speech failed' })
+        logMessage(`Error during summarization and text-to-speech: ${error}`, 'error')
     }
 }
 
 /**
  * Handle text-to-speech conversion of selected or current message text
  */
-async function handleText2Speech(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function handleText2Speech(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
 
-    const textToPlay = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
+    try {
+        const textToPlay = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
 
-    if (textToPlay == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        llmProvider.getSpeechFromText(textToPlay).then(blob => {
-            sendMessageToActiveTab({ type: 'addAudio', content: blob })
-        }).catch(error => {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during text-to-speech conversion: ${error.message}`, 'error')
-        })
+        if (textToPlay == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
+            return;
+        }
+
+        const blob = await llmService.getSpeechFromText(textToPlay)
+        sendMessageToActiveTab({ type: 'addAudio', content: blob })
+
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error instanceof Error ? error.message : 'Text-to-speech failed' })
+        logMessage(`Error during text-to-speech conversion: ${error}`, 'error')
     }
 }
 
 /**
  * Handle translation of selected or current message text
  */
-async function handleTranslate(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function handleTranslate(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
 
-    const textToTranslate = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
+    try {
+        const textToTranslate = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
 
-    if (textToTranslate == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        llmProvider.translateText(textToTranslate).then(textTranslated => {
-            sendMessageToActiveTab({ type: 'addText', content: textTranslated })
-        }).catch(error => {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during translation: ${error.message}`, 'error')
-        })
+        if (textToTranslate == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
+            return;
+        }
+
+        const textTranslated = await llmService.translateText(textToTranslate)
+        sendMessageToActiveTab({ type: 'addText', content: textTranslated })
+
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error instanceof Error ? error.message : 'Translation failed' })
+        logMessage(`Error during translation: ${error}`, 'error')
     }
 }
 
 /**
  * Handle translation and summarization of selected or current message text
  */
-async function handleTranslateAndSummarize(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function handleTranslateAndSummarize(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
 
-    const textToProcess = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
+    try {
+        const textToProcess = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
 
-    if (textToProcess == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        try {
-            const textTranslated = await llmProvider.translateText(textToProcess)
-            const textTranslateAndSummarized = await llmProvider.summarizeText(textTranslated)
-
-            sendMessageToActiveTab({ type: 'addText', content: textTranslateAndSummarized })
-        } catch (error) {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during translation and summarization: ${error.message}`, 'error')
+        if (textToProcess == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
+            return;
         }
+
+        const textTranslated = await llmService.translateText(textToProcess)
+        const textTranslateAndSummarized = await llmService.summarizeText(textTranslated)
+
+        sendMessageToActiveTab({ type: 'addText', content: textTranslateAndSummarized })
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error instanceof Error ? error.message : 'Translate & Summarize failed' })
+        logMessage(`Error during translation and summarization: ${error}`, 'error')
     }
 }
 
 /**
  * Handle translation and text-to-speech of selected or current message text
  */
-async function handleTranslateAndText2Speech(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function handleTranslateAndText2Speech(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
 
-    const textToProcess = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
+    try {
+        const textToProcess = (info.selectionText) ? info.selectionText : await getCurrentMessageContent()
 
-    if (textToProcess == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        try {
-            const textTranslated = await llmProvider.translateText(textToProcess)
-            const blob = await llmProvider.getSpeechFromText(textTranslated)
-
-            sendMessageToActiveTab({ type: 'addAudio', content: blob })
-        } catch (error) {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during translation and text2Speech: ${error.message}`, 'error')
+        if (textToProcess == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
+            return;
         }
+
+        const textTranslated = await llmService.translateText(textToProcess)
+        const blob = await llmService.getSpeechFromText(textTranslated)
+
+        sendMessageToActiveTab({ type: 'addAudio', content: blob })
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error instanceof Error ? error.message : 'Translate & Speech failed' })
+        logMessage(`Error during translation and text2Speech: ${error}`, 'error')
     }
 }
 
 /**
  * Handle moderation of current message text
  */
-async function handleModerate(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
+async function handleModerate(info: browser.menus.OnClickData, llmService: LlmService): Promise<void> {
     sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
 
-    const textToModerate = await getCurrentMessageContent()
+    try {
+        const textToModerate = await getCurrentMessageContent()
 
-    if (textToModerate == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        llmProvider.moderateText(textToModerate).then(moderatedResponse => {
-            sendMessageToActiveTab({ type: 'addChart', content: moderatedResponse })
-        }).catch(error => {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error during moderation: ${error.message}`, 'error')
-        })
-    }
-}
+        if (textToModerate == null) {
+            sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
+            return;
+        }
+        const moderatedResponse = await llmService.moderateText(textToModerate)
+        sendMessageToActiveTab({ type: 'addChart', content: moderatedResponse })
 
-/**
- * Handle suggesting improvements for current message text
- */
-async function handleSuggestImprovements(info: browser.menus.OnClickData, llmProvider: any): Promise<void> {
-    sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') })
-
-    const textToImprove = await getCurrentMessageContent()
-
-    if (textToImprove == null) {
-        sendMessageToActiveTab({ type: 'showError', content: messenger.i18n.getMessage('errorTextNotFound') })
-    }
-    else {
-        llmProvider.suggestImprovementsForText(textToImprove).then(improvedText => {
-            sendMessageToActiveTab({ type: 'addText', content: improvedText })
-        }).catch(error => {
-            sendMessageToActiveTab({ type: 'showError', content: error.message })
-            logMessage(`Error while improving the text: ${error.message}`, 'error')
-        })
+    } catch (error) {
+        sendMessageToActiveTab({ type: 'showError', content: error instanceof Error ? error.message : 'Moderation failed' })
+        logMessage(`Error during moderation: ${error}`, 'error')
     }
 }
 
@@ -952,12 +961,15 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
                 sendMessageToActiveTab({ type: 'thinking', content: messenger.i18n.getMessage('thinking') }, effectiveTabId);
 
                 try {
-                    const configs = await getConfigs();
-                    const llmProvider = ProviderFactory.getInstance(configs);
+                    // Re-fetch configs and recreate service as state might be lost
+                    const configs = await getConfigs()
+                    const provider = ProviderFactory.getInstance(configs)
+                    const promptManager = new PromptManager()
+                    const service = new LlmService(provider, promptManager, configs)
 
                     // Call LLM provider with context, type, and custom instructions
                     logMessage(`Calling LLM provider with context: ${textForContext}, customInstructions: ${customInstructions}`, 'log');
-                    const textSuggested = await llmProvider.suggestReplyFromText(textForContext, customInstructions);
+                    const textSuggested = await service.suggestReplyFromText(textForContext, customInstructions);
 
                     // Show the reply in the panel of THE SPECIFIC TAB
                     sendMessageToActiveTab({ type: 'addText', content: textSuggested }, effectiveTabId);
@@ -1009,67 +1021,71 @@ browser.windows.onRemoved.addListener((closedWindowId) => {
 // The function manages the visibility of menu options based on the user-selected
 // LLM.
 async function updateMenuVisibility(): Promise<void> {
-    const configs = await getConfigs()
-    const llmProvider = ProviderFactory.getInstance(configs)
+    try {
+        const configs = await getConfigs()
+        let provider: GenericProvider | null = null;
+        let service: LlmService | null = null;
+        let providerError: Error | null = null;
 
-    // canModerateText -->
-    messenger.menus.update(menuIdModerate, {
-        enabled: llmProvider.getCanModerateText()
-    })
-    // <-- canModerateText
+        try {
+            provider = ProviderFactory.getInstance(configs)
+            const promptManager = new PromptManager();
+            service = new LlmService(provider, promptManager, configs);
+        } catch (error) {
+            logMessage(`Visibility Check: Failed to create provider/service. Error: ${error instanceof Error ? error.message : error}`, 'warn')
+            providerError = error instanceof Error ? error : new Error('Provider configuration error');
+        }
 
-    // canRephraseText -->
-    messenger.menus.update(subMenuIdRephrase, {
-        enabled: llmProvider.getCanRephraseText()
-    })
-    // <-- canRephraseText
+        const isConfigured = !!provider && !providerError;
+        // Corrected: Use the actual capability check method names
+        const canSpeech = isConfigured && service?.getCanSpeechFromText();
+        const canModerate = isConfigured && service?.getCanModerateText();
 
-    // canSpeechFromText -->
-    messenger.menus.update(menuIdText2Speech, {
-        enabled: llmProvider.getCanSpeechFromText()
-    })
+        // IDs of menus that require a fully configured provider
+        // Text generation capabilities are assumed if provider is configured
+        const providerRequiredMenus = [
+            'aiSummarize', 'aiSubMenuRephrase', 'aiSuggestReply',
+            'aiSubMenuSummarize', 'aiTranslate', 'aiSubMenuTranslateAndSummarize'
+            // 'aiSuggestImprovements' is commented out
+            // 'aiModerate' depends on canModerate
+            // 'aiText2Speech' and related depend on canSpeech
+        ];
 
-    messenger.menus.update(menuIdSummarizeAndText2Speech, {
-        enabled: llmProvider.getCanSpeechFromText()
-    })
+        // Update visibility for general provider-dependent menus
+        for (const menuId of providerRequiredMenus) {
+            try {
+                await messenger.menus.update(menuId, { visible: isConfigured });
+            } catch (e) {
+                logMessage(`Error updating menu ${menuId}: ${e}`, 'warn'); // Log errors updating individual menus
+            }
+        }
 
-    messenger.menus.update(menuIdTranslateAndText2Speech, {
-        enabled: llmProvider.getCanSpeechFromText()
-    })
-    // <-- canSpeechFromText
+        // Update visibility for speech-dependent menus
+        try {
+            await messenger.menus.update('aiSummarizeAndText2Speech', { visible: canSpeech });
+            await messenger.menus.update('aiTranslateAndSummarizeAndText2Speech', { visible: canSpeech });
+            await messenger.menus.update('aiText2Speech', { visible: canSpeech });
+        } catch (e) {
+            logMessage(`Error updating speech menus: ${e}`, 'warn');
+        }
 
-    // canSuggestImprovementsForText -->
-    /* Not very useful, maybe we can improve it in the future.
-    messenger.menus.update(menuIdSuggestImprovements, {
-        enabled: llmProvider.getCanSuggestImprovementsForText()
-    })
-    */
-    // <-- canSuggestImprovementsForText
+        // Update visibility for moderation-dependent menus
+        try {
+            await messenger.menus.update('aiModerate', { visible: canModerate });
+        } catch (e) {
+            logMessage(`Error updating moderation menu: ${e}`, 'warn');
+        }
 
-    // canSuggestReply -->
-    messenger.menus.update(menuIdSuggestReply, {
-        enabled: llmProvider.getCanSuggestReply()
-    })
-    // <-- canSuggestReply
+        // Refresh menus to apply changes
+        try {
+            await messenger.menus.refresh();
+            logMessage('Menu visibility updated based on configuration.', 'info');
+        } catch (e) {
+            logMessage(`Error refreshing menus: ${e}`, 'error');
+        }
 
-    // canSummarizeText -->
-    messenger.menus.update(menuIdSummarize, {
-        enabled: llmProvider.getCanSummarizeText()
-    })
-
-    messenger.menus.update(subMenuIdSummarize, {
-        enabled: llmProvider.getCanSummarizeText()
-    })
-    // <-- canSummarizeText
-
-    // canTranslateText -->
-    messenger.menus.update(menuIdTranslate, {
-        enabled: llmProvider.getCanTranslateText()
-    })
-
-    messenger.menus.update(subMenuIdTranslateAnd, {
-        enabled: llmProvider.getCanTranslateText()
-    })
-    // <-- canTranslateText
+    } catch (error) {
+        logMessage(`Error updating menu visibility: ${error}`, 'error')
+    }
 }
 

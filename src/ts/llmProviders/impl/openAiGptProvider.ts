@@ -1,6 +1,6 @@
 import { GenericProvider } from '../genericProvider'
 import { ConfigType } from '../../helpers/configType'
-import { getLanguageNameFromCode, logMessage } from '../../helpers/utils'
+import { logMessage } from '../../helpers/utils'
 
 /**
  * Class with the implementation of methods useful for interfacing with the
@@ -28,13 +28,18 @@ export class OpenAiGptProvider extends GenericProvider {
         this.text2speechSpeed = config.openai.text2speech.speed
     }
 
+    /**
+     * Generates speech from text using OpenAI's TTS API.
+     * @param input Text to convert to speech (max 4096 chars).
+     * @returns A Promise resolving to the audio Blob.
+     */
     public async getSpeechFromText(input: string): Promise<Blob> {
-        logMessage(`Request for text2speech of the text: ${input}`, 'debug')
+        logMessage(`OpenAI: Request for text2speech of text: "${input.substring(0, 50)}..."`, 'debug')
 
-        // The maximum input length is 4096 characters, see official documentation:
         // https://platform.openai.com/docs/api-reference/audio/createSpeech
         if (input.length > 4096) {
-            throw new Error('The text is too long, it exceeds the maximum of 4096 characters')
+            logMessage('OpenAI: Text too long for TTS (> 4096 chars).', 'error')
+            throw new Error('OpenAI TTS error: The text is too long (max 4096 characters).')
         }
 
         const { signal, clearAbortSignalWithTimeout } = this.createAbortSignalWithTimeout(this.servicesTimeout)
@@ -54,24 +59,46 @@ export class OpenAiGptProvider extends GenericProvider {
             signal: signal
         }
 
-        const response = await fetch('https://api.openai.com/v1/audio/speech', requestOptions)
-        clearAbortSignalWithTimeout()
+        try {
+            const response = await fetch('https://api.openai.com/v1/audio/speech', requestOptions)
+            clearAbortSignalWithTimeout()
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`OpenAI error: ${errorResponse.error.message}`)
+            if (!response.ok) {
+                let errorMsg = `OpenAI TTS API error: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `OpenAI TTS API error: ${errorResponse?.error?.message || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('OpenAI TTS: Failed to parse error response JSON.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+            logMessage('OpenAI TTS: Received audio blob.', 'debug')
+            return await response.blob()
+
+        } catch (error) {
+            clearAbortSignalWithTimeout()
+            if (error instanceof Error && error.name === 'AbortError') {
+                logMessage('OpenAI TTS: Request timed out.', 'error')
+                throw new Error('OpenAI TTS request timed out.');
+            }
+            logMessage(`OpenAI TTS: Request failed - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            throw error instanceof Error ? error : new Error('OpenAI TTS request failed');
         }
-
-        return await response.blob()
     }
 
-    // Classifies if text input is potentially harmful.
-    // https://platform.openai.com/docs/api-reference/moderations
+    /**
+     * Classifies text using OpenAI's Moderation API.
+     * @param input Text to classify.
+     * @returns A Promise resolving to an object with translated category names and scores (0-100).
+     */
     public async moderateText(input: string): Promise<{ [key: string]: number }> {
+        logMessage(`OpenAI: Request for moderation of text: "${input.substring(0, 50)}..."`, 'debug')
         const { signal, clearAbortSignalWithTimeout } = this.createAbortSignalWithTimeout(this.servicesTimeout)
 
         const requestData = JSON.stringify({
-            'model': 'omni-moderation-latest',
+            // 'model': 'text-moderation-latest', // Using latest as per docs
             'input': input
         })
 
@@ -83,56 +110,37 @@ export class OpenAiGptProvider extends GenericProvider {
             signal: signal
         }
 
-        const response = await fetch('https://api.openai.com/v1/moderations', requestOptions)
-        clearAbortSignalWithTimeout()
+        try {
+            const response = await fetch('https://api.openai.com/v1/moderations', requestOptions)
+            clearAbortSignalWithTimeout()
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`OpenAI error: ${errorResponse.error.message}`)
+            if (!response.ok) {
+                let errorMsg = `OpenAI Moderation API error: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `OpenAI Moderation API error: ${errorResponse?.error?.message || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('OpenAI Moderation: Failed to parse error response JSON.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const jsonData = await response.json()
+            logMessage('OpenAI Moderation: Received classification results.', 'debug')
+            return this.normalizeModerationResponse(jsonData)
+
+        } catch (error) {
+            clearAbortSignalWithTimeout()
+            if (error instanceof Error && error.name === 'AbortError') {
+                logMessage('OpenAI Moderation: Request timed out.', 'error')
+                throw new Error('OpenAI Moderation request timed out.');
+            }
+            logMessage(`OpenAI Moderation: Request failed - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            throw error instanceof Error ? error : new Error('OpenAI Moderation request failed');
         }
-
-        const jsonData = await response.json()
-        return this.normalizeModerationResponse(jsonData)
     }
 
-    public async rephraseText(input: string, toneOfVoice: string): Promise<string> {
-        logMessage(`Request to use the tone of voice "${toneOfVoice}" to rephrase the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.REPHRASE.replace('%s', toneOfVoice), input)
-    }
-
-    public async suggestImprovementsForText(input: string): Promise<string> {
-        logMessage(`Request suggest improvements for the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUGGEST_IMPROVEMENTS, input)
-    }
-
-    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
-        logMessage(`Request to suggest a reply to the text: ${input}${customInstructions ? ' with custom instructions: ' + customInstructions : ''}`, 'debug')
-
-        let prompt = this.PROMPTS.SUGGEST_REPLY;
-        if (customInstructions) {
-            prompt += `\n\nFollow these additional instructions/comments from the recipient: ${customInstructions}`;
-        }
-
-        return this.manageMessageContent(prompt, input)
-    }
-
-    public async summarizeText(input: string): Promise<string> {
-        logMessage(`Request to summarize the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUMMARIZE, input)
-    }
-
-    public async testIntegration(): Promise<void> {
-        await this.translateText('Hi!')
-    }
-
-    public async translateText(input: string): Promise<string> {
-        logMessage(`Request to translate in ${getLanguageNameFromCode(this.mainUserLanguageCode)} the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.TRANSLATE.replace('%s', getLanguageNameFromCode(this.mainUserLanguageCode)), input)
-    }
 
     /**
      * Function to generate headers for API requests.
@@ -152,34 +160,38 @@ export class OpenAiGptProvider extends GenericProvider {
     }
 
     /**
-     * This asynchronous method manages message content by sending a request
-     * to the OpenAI API using the provided system and user input.
-     * It constructs a POST request with the relevant model and message data,
-     * manages the request with a timeout signal, and processes the response.
+     * Executes a prompt using the OpenAI Chat Completions API.
      *
-     * If the request is successful, it returns the content of the response
-     * message.
-     * In case of failure, it throws an error with the specific message from
-     * the OpenAI API.
+     * Implements the abstract method from GenericProvider.
+     * Constructs a POST request, handles custom instructions by appending them
+     * to the system prompt, and processes the API response.
      *
-     * @param systemInput - The input for the 'system' role in the conversation.
-     * @param userInput - The input for the 'user' role in the conversation.
+     * @param systemPrompt - The base system prompt.
+     * @param userInput - The main user input text.
+     * @param customInstructions - Optional additional instructions.
      *
-     * @returns A promise that resolves to the content of the response message
-     *          from the API.
+     * @returns A promise that resolves to the text content of the API response.
      *
-     * @throws An error if the API response is not successful.
+     * @throws An error if the API response is not successful or times out.
      */
-    private async manageMessageContent(systemInput: string, userInput: string): Promise<string> {
+    protected async _executePrompt(systemPrompt: string, userInput: string, customInstructions?: string): Promise<string> {
         const { signal, clearAbortSignalWithTimeout } = this.createAbortSignalWithTimeout(this.servicesTimeout)
+
+        let finalSystemPrompt = systemPrompt;
+        if (customInstructions) {
+            // Append custom instructions to the system prompt
+            finalSystemPrompt += `\n\nAdditional instructions: ${customInstructions}`;
+            logMessage(`OpenAI: Appending custom instructions to system prompt.`, 'debug')
+        }
 
         const requestData = JSON.stringify({
             'model': this.model,
             'messages': [
-                { 'role': 'system', 'content': systemInput },
+                { 'role': 'system', 'content': finalSystemPrompt },
                 { 'role': 'user', 'content': userInput }
             ],
             'temperature': this.temperature
+            // 'max_tokens': ... // Consider if needed
         })
 
         const requestOptions: RequestInit = {
@@ -190,49 +202,81 @@ export class OpenAiGptProvider extends GenericProvider {
             signal: signal
         }
 
-        const response = await fetch('https://api.openai.com/v1/chat/completions', requestOptions)
-        clearAbortSignalWithTimeout()
+        try {
+            logMessage(`OpenAI: Sending request to model ${this.model} with system prompt: "${finalSystemPrompt.substring(0, 100)}..."`, 'debug');
+            const response = await fetch('https://api.openai.com/v1/chat/completions', requestOptions)
+            clearAbortSignalWithTimeout()
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`OpenAI error: ${errorResponse.error.message}`)
+            if (!response.ok) {
+                let errorMsg = `OpenAI Chat API error: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `OpenAI Chat API error: ${errorResponse?.error?.message || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('OpenAI Chat: Failed to parse error response JSON.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage(`OpenAI Chat: Received response.`, 'debug')
+
+            // Check response structure
+            if (responseData.choices && responseData.choices.length > 0 && responseData.choices[0].message && responseData.choices[0].message.content) {
+                return responseData.choices[0].message.content
+            } else {
+                logMessage('OpenAI Chat: Received empty or unexpected response format.', 'warn')
+                return '';
+            }
+        } catch (error) {
+            clearAbortSignalWithTimeout()
+            if (error instanceof Error && error.name === 'AbortError') {
+                logMessage('OpenAI Chat: Request timed out.', 'error')
+                throw new Error('OpenAI Chat request timed out.');
+            }
+            logMessage(`OpenAI Chat: Request failed - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            throw error instanceof Error ? error : new Error('OpenAI Chat request failed');
         }
-
-        const responseData = await response.json()
-        return responseData.choices[0].message.content
     }
 
     /**
-     * This method normalizes the moderation response by rounding the category
-     * scores to the nearest integer.
+     * Normalizes the moderation response by rounding scores and translating keys.
      *
      * It takes the first result from the provided JSON data and processes its
-     * category scores, the result is an object where the keys are the category
-     * names and the values are the rounded scores.
+     * category scores. Uses localization keys like 'mailModerate.openaiClassification.hate_threatening'.
+     * See: https://platform.openai.com/docs/guides/moderation/quickstart
+     *
+     * @param data - The raw JSON response data from the Moderation API.
+     * @returns An object mapping translated category names to rounded scores (0-100).
      */
     private normalizeModerationResponse(data: any): { [key: string]: number } {
+        // Basic check for expected structure
+        if (!data?.results?.[0]?.category_scores) {
+            logMessage('OpenAI Moderation: Unexpected response structure for normalization.', 'warn');
+            return {};
+        }
+
         const categoryScores = data.results[0].category_scores
         const normalizedScores: { [key: string]: number } = {}
 
-        // Iterate over the category scores and round the values
         for (const category in categoryScores) {
-            if (categoryScores.hasOwnProperty(category)) {
-                // Manage a translated string for a specific OpenAI moderation
-                // category.
-                // Each moderation category (e.g., "hate/threatening") has an
-                // associated name that may contain the "/" character, but
-                // since localization keys cannot contain "/", it's necessary 
-                // to replace "/" with "_",
-                // The string 'mailModerate.openaiClassification.' is concatenated
-                // with the modified category (where "/" is replaced with "_") to
-                // form a localization key. This key is then used to retrieve the
-                // translated text associated with that specific moderation category
-                // in line with OpenAI's moderation documentation available at: 
-                // https://platform.openai.com/docs/guides/moderation/quickstart?moderation-quickstart-examples=text
-                const translatedCategory = browser.i18n.getMessage('mailModerate.openaiClassification.' + category.replace(/\//g, '_'))
+            if (Object.prototype.hasOwnProperty.call(categoryScores, category)) {
+                try {
+                    // Replace / with _ for localization key
+                    const localizationKey = 'mailModerate.openaiClassification.' + category.replace(/\//g, '_')
+                    const translatedCategory = browser.i18n.getMessage(localizationKey)
 
-                // Round the value and store it in the normalizedScores object
-                normalizedScores[translatedCategory] = Math.round(categoryScores[category] * 100)
+                    // Use original category name if translation fails/is missing
+                    const finalCategoryName = translatedCategory || category;
+
+                    // Round the value and store it
+                    normalizedScores[finalCategoryName] = Math.round(categoryScores[category] * 100)
+                } catch (error) {
+                    // Handle potential errors from getMessage (e.g., missing key)
+                    logMessage(`OpenAI Moderation: Failed to translate category key "${category}". Using original name.`, 'warn');
+                    normalizedScores[category] = Math.round(categoryScores[category] * 100)
+                }
             }
         }
 

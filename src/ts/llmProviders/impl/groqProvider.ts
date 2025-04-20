@@ -1,6 +1,6 @@
 import { GenericProvider } from '../genericProvider'
 import { ConfigType } from '../../helpers/configType'
-import { getLanguageNameFromCode, logMessage } from '../../helpers/utils'
+import { logMessage } from '../../helpers/utils'
 
 /**
  * Class with the implementation of methods useful for interfacing with the
@@ -21,9 +21,11 @@ export class GroqProvider extends GenericProvider {
     }
 
     /**
-     * Returns an array of model IDs for all available Groq Cloud models.
+     * Returns an array of model IDs for available Groq Cloud models.
+     * Requires a valid API key.
      */
     public static async getModels(apiKey: string): Promise<string[]> {
+        logMessage('Groq: Fetching available models.', 'debug')
         const requestOptions: RequestInit = {
             method: 'GET',
             redirect: 'follow',
@@ -32,56 +34,36 @@ export class GroqProvider extends GenericProvider {
             })
         }
 
-        const response = await fetch('https://api.groq.com/openai/v1/models', requestOptions)
+        try {
+            const response = await fetch('https://api.groq.com/openai/v1/models', requestOptions)
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`Groq error: ${errorResponse.error.message}`)
+            if (!response.ok) {
+                let errorMsg = `Groq API error fetching models: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `Groq API error fetching models: ${errorResponse?.error?.message || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('Groq: Failed to parse error response JSON while fetching models.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage('Groq: Successfully fetched models.', 'debug')
+            // Return an array of model IDs from the response data
+            if (responseData?.data && Array.isArray(responseData.data)) {
+                return responseData.data
+                    .map((model: { id: string }) => model.id)
+                    .filter((id): id is string => typeof id === 'string'); // Ensure only strings are returned
+            } else {
+                logMessage('Groq: Unexpected response format when fetching models.', 'warn');
+                return [];
+            }
+        } catch (error) {
+            logMessage(`Groq: Failed to fetch models - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            throw error instanceof Error ? error : new Error('Groq failed to fetch models');
         }
-
-        const responseData = await response.json()
-
-        // Return an array of model IDs from the response data
-        return responseData.data.map((model: { id: string }) => model.id)
-    }
-
-    public async rephraseText(input: string, toneOfVoice: string): Promise<string> {
-        logMessage(`Request to use the tone of voice "${toneOfVoice}" to rephrase the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.REPHRASE.replace('%s', toneOfVoice), input)
-    }
-
-    public async suggestImprovementsForText(input: string): Promise<string> {
-        logMessage(`Request suggest improvements for the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUGGEST_IMPROVEMENTS, input)
-    }
-
-    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
-        logMessage(`Request to suggest a reply to the text: ${input}${customInstructions ? ' with custom instructions: ' + customInstructions : ''}`, 'debug')
-
-        let prompt = this.PROMPTS.SUGGEST_REPLY;
-        if (customInstructions) {
-            prompt += `\n\nFollow these additional instructions/comments from the recipient: ${customInstructions}`;
-        }
-
-        return this.manageMessageContent(prompt, input)
-    }
-
-    public async summarizeText(input: string): Promise<string> {
-        logMessage(`Request to summarize the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUMMARIZE, input)
-    }
-
-    public async testIntegration(): Promise<void> {
-        await this.translateText('Hi!')
-    }
-
-    public async translateText(input: string): Promise<string> {
-        logMessage(`Request to translate in ${getLanguageNameFromCode(this.mainUserLanguageCode)} the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.TRANSLATE.replace('%s', getLanguageNameFromCode(this.mainUserLanguageCode)), input)
     }
 
     /**
@@ -98,34 +80,38 @@ export class GroqProvider extends GenericProvider {
     }
 
     /**
-     * This asynchronous method manages message content by sending a request
-     * to the Groq Cloud API using the provided system and user input.
-     * It constructs a POST request with the relevant model and message data,
-     * manages the request with a timeout signal, and processes the response.
+     * Executes a prompt using the Groq Cloud API (OpenAI compatible endpoint).
      *
-     * If the request is successful, it returns the content of the response
-     * message.
-     * In case of failure, it throws an error with the specific message from
-     * the Groq Cloud API.
+     * Implements the abstract method from GenericProvider.
+     * Constructs a POST request, handles custom instructions by appending them
+     * to the system prompt, and processes the API response.
      *
-     * @param systemInput - The input for the 'system' role in the conversation.
-     * @param userInput - The input for the 'user' role in the conversation.
+     * @param systemPrompt - The base system prompt.
+     * @param userInput - The main user input text.
+     * @param customInstructions - Optional additional instructions.
      *
-     * @returns A promise that resolves to the content of the response message
-     *          from the API.
+     * @returns A promise that resolves to the text content of the API response.
      *
-     * @throws An error if the API response is not successful.
+     * @throws An error if the API response is not successful or times out.
      */
-    private async manageMessageContent(systemInput: string, userInput: string): Promise<string> {
+    protected async _executePrompt(systemPrompt: string, userInput: string, customInstructions?: string): Promise<string> {
         const { signal, clearAbortSignalWithTimeout } = this.createAbortSignalWithTimeout(this.servicesTimeout)
+
+        let finalSystemPrompt = systemPrompt;
+        if (customInstructions) {
+            // Append custom instructions to the system prompt
+            finalSystemPrompt += `\n\nAdditional instructions: ${customInstructions}`;
+            logMessage(`Groq: Appending custom instructions to system prompt.`, 'debug')
+        }
 
         const requestData = JSON.stringify({
             'model': this.model,
             'messages': [
-                { 'role': 'system', 'content': systemInput },
+                { 'role': 'system', 'content': finalSystemPrompt },
                 { 'role': 'user', 'content': userInput }
             ],
             'temperature': this.temperature
+            // 'max_tokens': ... // Consider if needed
         })
 
         const requestOptions: RequestInit = {
@@ -136,15 +122,41 @@ export class GroqProvider extends GenericProvider {
             signal: signal
         }
 
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', requestOptions)
-        clearAbortSignalWithTimeout()
+        try {
+            logMessage(`Groq: Sending request to model ${this.model} with system prompt: "${finalSystemPrompt.substring(0, 100)}..."`, 'debug');
+            const response = await fetch('https://api.groq.com/openai/v1/chat/completions', requestOptions)
+            clearAbortSignalWithTimeout()
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`Groq error: ${errorResponse.error.message}`)
+            if (!response.ok) {
+                let errorMsg = `Groq Chat API error: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `Groq Chat API error: ${errorResponse?.error?.message || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('Groq Chat: Failed to parse error response JSON.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage(`Groq Chat: Received response.`, 'debug')
+
+            // Check response structure
+            if (responseData.choices && responseData.choices.length > 0 && responseData.choices[0].message && responseData.choices[0].message.content) {
+                return responseData.choices[0].message.content
+            } else {
+                logMessage('Groq Chat: Received empty or unexpected response format.', 'warn')
+                return '';
+            }
+        } catch (error) {
+            clearAbortSignalWithTimeout()
+            if (error instanceof Error && error.name === 'AbortError') {
+                logMessage('Groq Chat: Request timed out.', 'error')
+                throw new Error('Groq Chat request timed out.');
+            }
+            logMessage(`Groq Chat: Request failed - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            throw error instanceof Error ? error : new Error('Groq Chat request failed');
         }
-
-        const responseData = await response.json()
-        return responseData.choices[0].message.content
     }
 }

@@ -1,6 +1,6 @@
 import { GenericProvider } from '../genericProvider'
 import { ConfigType } from '../../helpers/configType'
-import { getLanguageNameFromCode, logMessage } from '../../helpers/utils'
+import { logMessage } from '../../helpers/utils'
 
 /**
  * Class with the implementation of methods useful for interfacing with the
@@ -21,101 +21,100 @@ export class LmsProvider extends GenericProvider {
     }
 
     /**
-     * Returns an array of model IDs for all available LM Studio models in
-     * the local installation.
+     * Returns an array of model IDs (loaded model file names) available in
+     * the local LM Studio installation.
+     * Requires the LM Studio server URL.
      */
     public static async getModels(serviceUrl: string): Promise<string[]> {
+        logMessage(`LM Studio: Fetching available models from ${serviceUrl}.`, 'debug')
+        // Basic validation for the service URL
+        if (!serviceUrl || !serviceUrl.startsWith('http')) {
+            logMessage('LM Studio: Invalid or missing service URL for getModels.', 'error')
+            throw new Error('LM Studio error: Invalid service URL provided.');
+        }
+
         const requestOptions: RequestInit = {
             method: 'GET',
             redirect: 'follow'
+            // No Authorization header needed for local LM Studio typically
         }
 
-        const response = await fetch(`${serviceUrl}/v1/models`, requestOptions)
+        try {
+            const response = await fetch(`${serviceUrl}/v1/models`, requestOptions)
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`AI Studio error: ${errorResponse.error.message}`)
+            if (!response.ok) {
+                let errorMsg = `LM Studio API error fetching models: ${response.status} ${response.statusText}`;
+                try {
+                    // LM Studio error format might differ, attempt to parse common OpenAI-like structure
+                    const errorResponse = await response.json();
+                    errorMsg = `LM Studio API error fetching models: ${errorResponse?.error?.message || errorResponse?.error || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('LM Studio: Failed to parse error response JSON while fetching models.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage('LM Studio: Successfully fetched models.', 'debug')
+            // Return an array of model IDs from the response data
+            if (responseData?.data && Array.isArray(responseData.data)) {
+                return responseData.data
+                    .map((model: { id: string }) => model.id)
+                    .filter((id): id is string => typeof id === 'string');
+            } else {
+                logMessage('LM Studio: Unexpected response format when fetching models.', 'warn');
+                return [];
+            }
+        } catch (error) {
+            logMessage(`LM Studio: Failed to fetch models from ${serviceUrl} - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            // Add specific hint for connection errors
+            if (error instanceof TypeError && error.message.includes('fetch')) {
+                throw new Error(`LM Studio: Failed to connect to server at ${serviceUrl}. Ensure the server is running and accessible.`);
+            }
+            throw error instanceof Error ? error : new Error('LM Studio failed to fetch models');
         }
-
-        const responseData = await response.json()
-
-        // Return an array of model IDs from the response data
-        return responseData.data.map((model: { id: string }) => model.id)
     }
 
-    public async rephraseText(input: string, toneOfVoice: string): Promise<string> {
-        logMessage(`Request to use the tone of voice "${toneOfVoice}" to rephrase the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.REPHRASE.replace('%s', toneOfVoice), input)
-    }
-
-    public async suggestImprovementsForText(input: string): Promise<string> {
-        logMessage(`Request suggest improvements for the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUGGEST_IMPROVEMENTS, input)
-    }
-
-    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
-        logMessage(`Request to suggest a reply to the text: ${input}${customInstructions ? ' with custom instructions: ' + customInstructions : ''}`, 'debug')
-
-        let prompt = this.PROMPTS.SUGGEST_REPLY;
-        if (customInstructions) {
-            prompt += `\n\nFollow these additional instructions/comments from the recipient: ${customInstructions}`;
-        }
-
-        return this.manageMessageContent(prompt, input)
-    }
-
-    public async summarizeText(input: string): Promise<string> {
-        logMessage(`Request to summarize the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUMMARIZE, input)
-    }
-
-    public async testIntegration(): Promise<void> {
-        await this.translateText('Hi!')
-    }
-
-    public async translateText(input: string): Promise<string> {
-        logMessage(`Request to translate in ${getLanguageNameFromCode(this.mainUserLanguageCode)} the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.TRANSLATE.replace('%s', getLanguageNameFromCode(this.mainUserLanguageCode)), input)
-    }
+    // testIntegration is inherited.
 
     /**
-     * This asynchronous method manages message content by sending a request
-     * to the AI Studio API using the provided system and user input.
-     * It constructs a POST request with the relevant model and message data,
-     * manages the request with a timeout signal, and processes the response.
+     * Executes a prompt using the LM Studio API (OpenAI compatible endpoint).
      *
-     * If the request is successful, it returns the content of the response
-     * message.
-     * In case of failure, it throws an error with the specific message from
-     * the AI Studio API.
+     * Implements the abstract method from GenericProvider.
+     * Constructs a POST request, handles custom instructions by appending them
+     * to the system prompt, and processes the API response.
      *
-     * @param systemInput - The input for the 'system' role in the conversation.
-     * @param userInput - The input for the 'user' role in the conversation.
+     * @param systemPrompt - The base system prompt.
+     * @param userInput - The main user input text.
+     * @param customInstructions - Optional additional instructions.
      *
-     * @returns A promise that resolves to the content of the response message
-     *          from the API.
+     * @returns A promise that resolves to the text content of the API response.
      *
-     * @throws An error if the API response is not successful.
+     * @throws An error if the API response is not successful or times out.
      */
-    private async manageMessageContent(systemInput: string, userInput: string): Promise<string> {
+    protected async _executePrompt(systemPrompt: string, userInput: string, customInstructions?: string): Promise<string> {
         const { signal, clearAbortSignalWithTimeout } = this.createAbortSignalWithTimeout(this.servicesTimeout)
 
-        // The AI Studio APIs explicitly require the declaration of the header
-        // field with a content type set to application/json.
+        let finalSystemPrompt = systemPrompt;
+        if (customInstructions) {
+            // Append custom instructions to the system prompt
+            finalSystemPrompt += `\n\nAdditional instructions: ${customInstructions}`;
+            logMessage(`LM Studio: Appending custom instructions to system prompt.`, 'debug')
+        }
+
+        // LM Studio requires Content-Type header
         const headers: Headers = new Headers()
         headers.append('Content-Type', 'application/json')
 
         const requestData = JSON.stringify({
-            'model': this.model,
+            'model': this.model, // Uses the specific model file name loaded in LM Studio
             'messages': [
-                { 'role': 'system', 'content': systemInput },
+                { 'role': 'system', 'content': finalSystemPrompt },
                 { 'role': 'user', 'content': userInput }
             ],
             'temperature': this.temperature
+            // 'max_tokens': ... // Consider if needed
         })
 
         const requestOptions: RequestInit = {
@@ -126,15 +125,46 @@ export class LmsProvider extends GenericProvider {
             signal: signal
         }
 
-        const response = await fetch(`${this.serviceUrl}/v1/chat/completions`, requestOptions)
-        clearAbortSignalWithTimeout()
+        const endpoint = `${this.serviceUrl}/v1/chat/completions`;
+        try {
+            logMessage(`LM Studio: Sending request to model ${this.model} at ${endpoint} with system prompt: "${finalSystemPrompt.substring(0, 100)}..."`, 'debug');
+            const response = await fetch(endpoint, requestOptions)
+            clearAbortSignalWithTimeout()
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`LM Studio error: ${errorResponse.error}`)
+            if (!response.ok) {
+                let errorMsg = `LM Studio Chat API error: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `LM Studio Chat API error: ${errorResponse?.error?.message || errorResponse?.error || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('LM Studio Chat: Failed to parse error response JSON.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage(`LM Studio Chat: Received response.`, 'debug')
+
+            // Check response structure
+            if (responseData.choices && responseData.choices.length > 0 && responseData.choices[0].message && responseData.choices[0].message.content) {
+                return responseData.choices[0].message.content
+            } else {
+                logMessage('LM Studio Chat: Received empty or unexpected response format.', 'warn')
+                return '';
+            }
+        } catch (error) {
+            clearAbortSignalWithTimeout()
+            if (error instanceof Error && error.name === 'AbortError') {
+                logMessage('LM Studio Chat: Request timed out.', 'error')
+                throw new Error('LM Studio Chat request timed out.');
+            }
+            if (error instanceof TypeError && error.message.includes('fetch')) {
+                logMessage(`LM Studio: Failed to connect to server at ${this.serviceUrl}. Ensure the server is running and accessible.`, 'error');
+                throw new Error(`LM Studio: Failed to connect to server at ${this.serviceUrl}.`);
+            }
+            logMessage(`LM Studio Chat: Request failed - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            throw error instanceof Error ? error : new Error('LM Studio Chat request failed');
         }
-
-        const responseData = await response.json()
-        return responseData.choices[0].message.content
     }
 }

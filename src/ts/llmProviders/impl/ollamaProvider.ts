@@ -1,6 +1,6 @@
 import { GenericProvider } from '../genericProvider'
 import { ConfigType } from '../../helpers/configType'
-import { getLanguageNameFromCode, logMessage } from '../../helpers/utils'
+import { logMessage } from '../../helpers/utils'
 
 /**
  * Class with the implementation of methods useful for interfacing with the
@@ -22,120 +22,147 @@ export class OllamaProvider extends GenericProvider {
     }
 
     /**
-     * Returns an array of name/model pairs for all active Ollama models in
-     * the local installation.
+     * Returns an array of name/model pairs for all downloaded Ollama models
+     * in the local installation.
+     * Requires the Ollama server URL.
      */
     public static async getModels(serviceUrl: string): Promise<{ name: string, model: string }[]> {
+        logMessage(`Ollama: Fetching available models from ${serviceUrl}.`, 'debug')
+        if (!serviceUrl || !serviceUrl.startsWith('http')) {
+            logMessage('Ollama: Invalid or missing service URL for getModels.', 'error')
+            throw new Error('Ollama error: Invalid service URL provided.');
+        }
+
         const requestOptions: RequestInit = {
             method: 'GET',
             redirect: 'follow'
         }
 
-        const response = await fetch(`${serviceUrl}/api/tags`, requestOptions)
+        try {
+            const response = await fetch(`${serviceUrl}/api/tags`, requestOptions)
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`Ollama error: ${errorResponse.error.message}`)
+            if (!response.ok) {
+                let errorMsg = `Ollama API error fetching models: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    // Ollama error structure might just be an 'error' string
+                    errorMsg = `Ollama API error fetching models: ${errorResponse?.error || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('Ollama: Failed to parse error response JSON while fetching models.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage('Ollama: Successfully fetched models.', 'debug')
+
+            // Extract an array of name/model pairs from the response
+            if (responseData?.models && Array.isArray(responseData.models)) {
+                return responseData.models
+                    .map((model: { name: string, model: string }) => ({
+                        name: model.name, // Typically includes tag, e.g., "llama2:7b"
+                        model: model.model // Base model, e.g., "llama2"
+                    }))
+                    .filter((m): m is { name: string, model: string } => m.name && m.model);
+            } else {
+                logMessage('Ollama: Unexpected response format when fetching models.', 'warn');
+                return [];
+            }
+        } catch (error) {
+            logMessage(`Ollama: Failed to fetch models from ${serviceUrl} - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            if (error instanceof TypeError && error.message.includes('fetch')) {
+                throw new Error(`Ollama: Failed to connect to server at ${serviceUrl}. Ensure the server is running and accessible.`);
+            }
+            throw error instanceof Error ? error : new Error('Ollama failed to fetch models');
         }
-
-        const responseData = await response.json()
-
-        // Extract an array of name/model pairs from the response
-        const models = responseData.models.map((model: { name: string, model: string }) => ({
-            name: model.name,
-            model: model.model
-        }))
-
-        return models
-    }
-
-    public async rephraseText(input: string, toneOfVoice: string): Promise<string> {
-        logMessage(`Request to use the tone of voice "${toneOfVoice}" to rephrase the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.REPHRASE.replace('%s', toneOfVoice), input)
-    }
-
-    public async suggestImprovementsForText(input: string): Promise<string> {
-        logMessage(`Request suggest improvements for the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUGGEST_IMPROVEMENTS, input)
-    }
-
-    public async suggestReplyFromText(input: string, customInstructions?: string): Promise<string> {
-        logMessage(`Request to suggest a reply to the text: ${input}${customInstructions ? ' with custom instructions: ' + customInstructions : ''}`, 'debug')
-
-        let prompt = this.PROMPTS.SUGGEST_REPLY;
-        if (customInstructions) {
-            prompt += `\n\nFollow these additional instructions/comments from the recipient: ${customInstructions}`;
-        }
-
-        return this.manageMessageContent(prompt, input)
-    }
-
-    public async summarizeText(input: string): Promise<string> {
-        logMessage(`Request to summarize the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.SUMMARIZE, input)
-    }
-
-    public async testIntegration(): Promise<void> {
-        await this.translateText('Hi!')
-    }
-
-    public async translateText(input: string): Promise<string> {
-        logMessage(`Request to translate in ${getLanguageNameFromCode(this.mainUserLanguageCode)} the text: ${input}`, 'debug')
-
-        return this.manageMessageContent(this.PROMPTS.TRANSLATE.replace('%s', getLanguageNameFromCode(this.mainUserLanguageCode)), input)
     }
 
     /**
-     * This asynchronous method manages message content by sending a request
-     * to the Ollama API using the provided system and user input.
-     * It constructs a POST request with the relevant model and message data,
-     * manages the request with a timeout signal, and processes the response.
+     * Executes a prompt using the Ollama /api/generate endpoint.
      *
-     * If the request is successful, it returns the content of the response
-     * message.
-     * In case of failure, it throws an error with the specific message from
-     * the Ollama API.
+     * Implements the abstract method from GenericProvider.
+     * Constructs a POST request using Ollama's specific format, handles custom
+     * instructions by appending them to the system prompt, and processes the response.
      *
-     * @param systemInput - The input for the 'system' role in the conversation.
-     * @param userInput - The input for the 'user' role in the conversation.
+     * @param systemPrompt - The base system prompt.
+     * @param userInput - The main user input text (becomes Ollama's 'prompt').
+     * @param customInstructions - Optional additional instructions.
      *
-     * @returns A promise that resolves to the content of the response message
-     *          from the API.
+     * @returns A promise that resolves to the text content of the API response.
      *
-     * @throws An error if the API response is not successful.
+     * @throws An error if the API response is not successful or times out.
      */
-    private async manageMessageContent(systemInput: string, userInput: string): Promise<string> {
+    protected async _executePrompt(systemPrompt: string, userInput: string, customInstructions?: string): Promise<string> {
         const { signal, clearAbortSignalWithTimeout } = this.createAbortSignalWithTimeout(this.servicesTimeout)
 
+        let finalSystemPrompt = systemPrompt;
+        if (customInstructions) {
+            // Append custom instructions to the system prompt
+            finalSystemPrompt += `\n\nAdditional instructions: ${customInstructions}`;
+            logMessage(`Ollama: Appending custom instructions to system prompt.`, 'debug')
+        }
+
+        // Note: Ollama typically doesn't require Content-Type unless server configured differently
         const requestData = JSON.stringify({
             'model': this.model,
-            'system': systemInput,
-            'prompt': userInput,
+            'system': finalSystemPrompt,
+            'prompt': userInput, // User input maps to Ollama's 'prompt' field
             'options': {
                 'temperature': this.temperature
+                // Add other Ollama options here if needed (e.g., num_predict, top_p)
             },
-            'stream': false
+            'stream': false // Ensure non-streaming response
         })
 
         const requestOptions: RequestInit = {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, // Explicitly add for safety
             body: requestData,
             redirect: 'follow',
             signal: signal
         }
 
-        const response = await fetch(`${this.serviceUrl}/api/generate`, requestOptions)
-        clearAbortSignalWithTimeout()
+        const endpoint = `${this.serviceUrl}/api/generate`;
+        try {
+            logMessage(`Ollama: Sending request to model ${this.model} at ${endpoint} with system prompt: "${finalSystemPrompt.substring(0, 100)}..."`, 'debug');
+            const response = await fetch(endpoint, requestOptions)
+            clearAbortSignalWithTimeout()
 
-        if (!response.ok) {
-            const errorResponse = await response.json()
-            throw new Error(`Ollama error: ${errorResponse.error}`)
+            if (!response.ok) {
+                let errorMsg = `Ollama Generate API error: ${response.status} ${response.statusText}`;
+                try {
+                    const errorResponse = await response.json();
+                    errorMsg = `Ollama Generate API error: ${errorResponse?.error || 'Unknown error'}`;
+                } catch (jsonError) {
+                    logMessage('Ollama Generate: Failed to parse error response JSON.', 'warn');
+                }
+                logMessage(errorMsg, 'error')
+                throw new Error(errorMsg)
+            }
+
+            const responseData = await response.json()
+            logMessage(`Ollama Generate: Received response.`, 'debug')
+
+            // Check response structure for Ollama's /api/generate
+            if (responseData && typeof responseData.response === 'string') {
+                return responseData.response
+            } else {
+                logMessage('Ollama Generate: Received empty or unexpected response format.', 'warn')
+                return '';
+            }
+        } catch (error) {
+            clearAbortSignalWithTimeout()
+            if (error instanceof Error && error.name === 'AbortError') {
+                logMessage('Ollama Generate: Request timed out.', 'error')
+                throw new Error('Ollama Generate request timed out.');
+            }
+            if (error instanceof TypeError && error.message.includes('fetch')) {
+                logMessage(`Ollama: Failed to connect to server at ${this.serviceUrl}. Ensure the server is running and accessible.`, 'error');
+                throw new Error(`Ollama: Failed to connect to server at ${this.serviceUrl}.`);
+            }
+            logMessage(`Ollama Generate: Request failed - ${error instanceof Error ? error.message : String(error)}`, 'error');
+            throw error instanceof Error ? error : new Error('Ollama Generate request failed');
         }
-
-        const responseData = await response.json()
-        return responseData.response
     }
 }
