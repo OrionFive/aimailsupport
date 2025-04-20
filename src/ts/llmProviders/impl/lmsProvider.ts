@@ -150,8 +150,10 @@ export class LmsProvider extends GenericProvider {
             if (responseData.choices && responseData.choices.length > 0 && responseData.choices[0].message && responseData.choices[0].message.content) {
                 return responseData.choices[0].message.content
             } else {
-                logMessage('LM Studio Chat: Received empty or unexpected response format.', 'warn')
-                return '';
+                const errorMsg = 'LM Studio Chat: Received empty or unexpected response format.';
+                logMessage(errorMsg, 'warn')
+                // Throw an error instead of returning empty string
+                throw new Error(errorMsg);
             }
         } catch (error) {
             clearAbortSignalWithTimeout()

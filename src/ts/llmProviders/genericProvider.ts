@@ -3,7 +3,7 @@
  * which all actual implementations must extend.
  */
 import { ConfigType } from '../helpers/configType'
-
+import { logMessage } from '../helpers/utils'
 export abstract class GenericProvider {
     protected mainUserLanguageCode: string
     protected servicesTimeout: number
@@ -62,6 +62,36 @@ export abstract class GenericProvider {
     public getCanSpeechFromText(): boolean {
         // Check if getSpeechFromText is overridden.
         return this.getSpeechFromText !== GenericProvider.prototype.getSpeechFromText
+    }
+
+    /**
+     * Performs a minimal API call to check connectivity and authentication.
+     * Throws an error if the connection or authentication fails.
+     */
+    public async checkConnection(): Promise<void> {
+        const expectedResponse = 'KthxBye';
+        try {
+            // Use a minimal prompt to verify the connection and auth via _executePrompt
+            const response = await this._executePrompt(`Respond with only the word: ${expectedResponse}`, '');
+
+            // Additionally, verify the content of the response
+            if (!response.includes(expectedResponse)) {
+                // Throw specific error if the response content does not contain what was expected
+                throw new Error(`Connection check failed: Unexpected response received. Expected response containing "${expectedResponse}", got "${response.substring(0, 50)}${response.length > 50 ? '...' : ''}"`);
+            }
+            // If response contains the expected string, connection is considered successful
+            logMessage(`Connection check successful: ${response}`, 'debug')
+
+        } catch (error) {
+            // Add context to the error message if not already specific
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            // Avoid double-wrapping the message if it already contains the prefix
+            if (errorMessage.startsWith('Connection check failed:')) {
+                throw error; // Re-throw the original error
+            } else {
+                throw new Error(`Connection check failed: ${errorMessage}`);
+            }
+        }
     }
 
     /**

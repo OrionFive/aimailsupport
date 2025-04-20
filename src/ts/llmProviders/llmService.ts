@@ -72,4 +72,15 @@ export class LlmService {
     public getCanModerateText(): boolean {
         return this.provider.getCanModerateText()
     }
+
+    /**
+     * Performs a minimal API call via the provider to check connectivity 
+     * and authentication.
+     * Throws an error if the connection or authentication fails.
+     */
+    public async checkConnection(): Promise<void> {
+        return this.provider.checkConnection();
+    }
+
+    // --- Capability checks delegated to the provider ---
 } 
